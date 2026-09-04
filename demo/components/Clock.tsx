@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 
 /** 可复用组件：位于 components/（不在 pages/ 下，因此不会被注入 data-node-id） */
-export default function Clock({ label = '服务器时间' }: { label?: string }) {
+export default function Clock({ label = '服务器时间', ...props }: { label?: string } & React.HTMLAttributes<HTMLDivElement>) {
   const [now, setNow] = useState(() => new Date());
 
   useEffect(() => {
@@ -10,7 +10,7 @@ export default function Clock({ label = '服务器时间' }: { label?: string })
   }, []);
 
   return (
-    <div style={{ fontSize: 12, color: '#64748b' }}>
+    <div style={{ fontSize: 12, color: '#64748b' }} {...props}>
       {label}: {now.toLocaleTimeString('zh-CN', { hour12: false })}
     </div>
   );

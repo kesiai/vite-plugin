@@ -1,14 +1,15 @@
 import { Plugin } from 'vite';
 import { ComponentScanner } from './componentScanner';
 import { createExpressServer } from './server';
-import { transformJSXWithAttributes } from './jsxTransform';
+import { transformJSXWithAttributes, AliasEntry } from './jsxTransform';
 import { setPagesDir } from './fileApiPlugin';
 import { resolve, relative, sep } from 'path';
 import type { PluginOptions } from './types';
 
 /**
  * Vite 开发插件：
- * 1. 编译期为 JSX 元素注入可溯源定位的 data-node-id（见 nodeId.ts / jsxTransform.ts）
+ * 1. 编译期为 pages/ 下的本地 JSX 注入 data-node-id / data-node-name / data-node-file
+ *    （见 nodeId.ts / jsxTransform.ts）
  * 2. 挂载 /__editor/* HTTP API（组件扫描、文件读写、安装、构建等）
  *
  * 仅在开发模式（vite serve）下生效，不影响生产构建。
@@ -24,6 +25,20 @@ export function kesiPlugin(options: PluginOptions = {}): Plugin {
   let scanner: ComponentScanner | undefined;
   let isDevelopment = true;
   let viteRoot = '';
+  let viteAliases: AliasEntry[] = [];
+
+  // 归一化 Vite resolve.alias（对象形式 / 数组形式）
+  const normalizeAliases = (alias: any): AliasEntry[] => {
+    if (!alias) return [];
+    if (Array.isArray(alias)) {
+      return alias
+        .filter((a: any) => a && typeof a.find === 'string' && typeof a.replacement === 'string')
+        .map((a: any) => ({ find: a.find, replacement: a.replacement }));
+    }
+    return Object.entries(alias)
+      .filter(([, v]) => typeof v === 'string')
+      .map(([find, replacement]) => ({ find, replacement: replacement as string }));
+  };
 
   return {
     name: '@kesi/vite-plugin',
@@ -40,6 +55,7 @@ export function kesiPlugin(options: PluginOptions = {}): Plugin {
 
     configureServer(server) {
       viteRoot = server.config.root;
+      viteAliases = normalizeAliases((server.config.resolve as any)?.alias);
 
       // 计算根目录：优先使用用户提供的 rootDir，否则用 Vite root
       const resolvedRootDir = rootDir ? resolve(rootDir) : viteRoot;
@@ -62,11 +78,15 @@ export function kesiPlugin(options: PluginOptions = {}): Plugin {
       if (id.includes('node_modules')) return null;
       if (!viteRoot) return null;
 
-      // 只处理 pages 目录下的文件
+      // 只处理 pages 目录下的文件（data-node-* 标记仅作用于页面层，
+      // 其他目录的 tsx 不做转换）
       const relativeId = relative(viteRoot, id).split(sep).join('/');
       if (!relativeId.startsWith(`${pagesDir}/`)) return null;
 
-      return addNodeIdAttributes(code, relativeId);
+      return addNodeAttributes(code, relativeId, {
+        rootDir: viteRoot,
+        aliases: viteAliases,
+      });
     },
 
     handleHotUpdate({ file }) {
@@ -94,16 +114,18 @@ export function kesiPlugin(options: PluginOptions = {}): Plugin {
 }
 
 /**
- * 为 JSX 注入 data-node-id（Babel AST 转换），出错时返回原代码
+ * 为 pages 下 JSX 注入 data-node-id / data-node-name / data-node-file（Babel AST 转换），
+ * 出错时返回原代码
  */
-function addNodeIdAttributes(
+function addNodeAttributes(
   code: string,
-  relativePath: string
+  relativePath: string,
+  options?: { rootDir: string; aliases: AliasEntry[] }
 ): { code: string; map?: any } {
   try {
-    return transformJSXWithAttributes(code, relativePath);
+    return transformJSXWithAttributes(code, relativePath, options);
   } catch (error) {
-    console.error('[@kesi/vite-plugin] Error adding data-node-id:', error);
+    console.error('[@kesi/vite-plugin] Error adding node attributes:', error);
     return { code };
   }
 }

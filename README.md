@@ -1,17 +1,37 @@
 # @kesi/vite-plugin
 
-一个面向 React 项目的 Vite 开发插件：在开发模式下为 JSX 注入**可溯源定位的 `data-node-id`**，并提供组件扫描、文件读写、依赖安装等 HTTP API（挂载于 `/__editor/*`），配合 Canvas 预览实现"可视化点选 → 源码精确定位 → AI 修改"的开发闭环。
+一个面向 React 项目的 Vite 开发插件：在开发模式下为 **`pages/` 下的 JSX** 注入**可溯源定位的 `data-node-id`**（每个元素）与**组件元信息 `data-node-name` / `data-node-file`**（页面里用到的组件），并提供组件扫描、文件读写、依赖安装等 HTTP API（挂载于 `/__editor/*`），配合 Canvas 预览实现"可视化点选 → 源码精确定位 → AI 修改"的开发闭环。
 
 > ⚠️ 仅在开发模式（`vite serve`）下生效，不影响生产构建。
 
 ## 功能特性
 
-### 1. data-node-id 源码定位标记（编译期注入）
+### 1. 源码定位与组件元信息（编译期注入）
 
-开发模式下，插件用 Babel AST 转换，为每个 JSX 元素的开标签自动注入 `data-node-id`。它不是随机的自增 id，而是**可解码的源码位置信息**：
+开发模式下，插件用 Babel AST 转换，**只处理 `pages/` 目录下的 `.tsx/.jsx`**（其它目录的
+tsx 不做转换），为页面 JSX 注入两类属性：
+
+**a) `data-node-id`（页面里的每个 JSX 元素）** —— 可解码的源码位置信息：
 
 ```
 data-node-id = "node-" + base64url( JSON )
+```
+
+**b) `data-node-name` / `data-node-file`（页面里用到的自定义组件）** —— 组件元信息：
+
+- 对页面中的组件元素（`<Button>`、`<AlertDialogContent>`、`<Card>`…）注入：
+  - `data-node-name`：组件真实的导出名（如 `Button`，别名导入时取原名）
+  - `data-node-file`：**组件定义文件的路径（相对项目根目录，如 `src/components/ui/button.tsx`）**
+    —— 通过静态解析该组件的 import 绑定（支持 `@/` 等别名）定位，是组件自己的文件，
+    不是使用它的页面文件
+- 宿主元素（`<div>`/`<button>`…）只有 `data-node-id`，不标 name/file；
+- 来自 node_modules 的外部包组件（如 lucide 图标）不标注（不属于项目源码）；
+- 属性以 props 形式传给组件，组件/原始组件把多余 props 转发到自身根 DOM 时即出现在真实节点上
+  （Base UI 已实测透传），因此 shadcn/ui 这类包装组件渲染出的原生元素同样可被识别。
+
+```html
+<!-- 例：页面里使用了 shadcn 的 <Button>，渲染出的原生 <button> 会带有： -->
+<button data-node-name="Button" data-node-file="src/components/ui/button.tsx" ...>go</button>
 ```
 
 解码后的 JSON（`NodeSourceSpan`）包含元素在源码中的精确跨度：
@@ -169,15 +189,19 @@ curl -X DELETE http://localhost:5173/__editor/file \
 
 ## 工作原理
 
-### 代码转换（data-node-id）
+### 代码转换（源码标记注入）
 
-1. Vite `transform` 钩子命中开发模式 + `pages/` 下的 `.tsx/.jsx`
-2. `@babel/parser` 解析为 AST
-3. 遍历每个 `JSXElement`，取开标签起始位置与结束标签起始位置（自闭合元素取自身结束位置）
-4. `encodeNodeId()` 序列化为 base64url 字符串注入 `data-node-id`
-5. `@babel/generator` 重新生成代码（保留行列与注释）
+1. Vite `transform` 钩子命中开发模式 + `pages/` 下的 `.tsx/.jsx`（其它目录不转换）
+2. `@babel/parser` 解析为 AST；收集文件内 import 绑定表
+3. 遍历每个 `JSXElement`：
+   - 注入 `data-node-id`：开标签起始位置与结束标签起始位置（自闭合元素取自身结束位置），`encodeNodeId()` 序列化为 base64url
+   - 对自定义组件元素解析 import 绑定（含 `@/` 别名），定位组件定义文件并注入
+     `data-node-name` / `data-node-file`
+4. `@babel/generator` 重新生成代码（保留行列与注释）
 
-**优点**：编译时完成零运行时开销；真实 DOM 属性，`querySelector('[data-node-id^="node-"]')` / `element.dataset.nodeId` 均可访问。
+**优点**：编译时完成零运行时开销；真实 DOM 属性，`querySelector('[data-node-id]')` / `element.dataset.nodeId` / `element.dataset.nodeName` / `element.dataset.nodeFile` 均可访问。
+
+**已知边界**：属性需随组件把多余 props 转发到自身根 DOM 才会出现在真实节点上；组件若不透传 props，其 DOM 上只会看到最近的上层已标注节点。默认导出组件会解析其定义文件以还原组件名。
 
 ### 组件扫描
 
@@ -189,7 +213,8 @@ curl -X DELETE http://localhost:5173/__editor/file \
 2. **仅限本地开发**：API 未做鉴权且可写文件、执行构建，请勿将 dev server 暴露到公网
 3. **目录要求**：`pages/` 目录位于项目根目录
 4. **Canvas 宿主**：画布模式需要宿主项目提供 `/Canvas.tsx`（通常从 `@kesi/vite-plugin/canvas` 引入再按需包装）
-5. **id 有效期**：`data-node-id` 编码的是注入时的源码位置；文件被编辑后 DOM 会随 HMR 重新渲染并携带新 id
+5. **标记有效期**：`data-node-id` 编码的是注入时的源码位置；`data-node-name/file` 同理。
+   文件被编辑后 DOM 会随 HMR 重新渲染并携带新标记
 
 ## 开发
 

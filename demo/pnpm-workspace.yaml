@@ -1,5 +1,0 @@
-# 独立 workspace：让 shadcn/pnpm 的安装操作限定在 demo 目录内，
-# 不受外层 kesi workspace（../..）影响
-packages: []
-allowBuilds:
-  esbuild: true
