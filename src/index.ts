@@ -1,16 +1,18 @@
 import { Plugin } from 'vite';
-import { airiotPlugin, PluginOptions } from './plugin';
+import { kesiPlugin } from './plugin';
+import type { PluginOptions } from './types';
 
 export * from './types';
 export * from './plugin';
 export * from './componentScanner';
+export * from './nodeId';
 
-export default airiotPlugin;
-export { airiotPlugin, PluginOptions };
+export default kesiPlugin;
+export { kesiPlugin };
 
 /**
- * Vite插件入口函数
+ * Vite 插件入口函数
  */
-export function airiot(options?: PluginOptions): Plugin {
-  return airiotPlugin(options);
+export function kesi(options?: PluginOptions): Plugin {
+  return kesiPlugin(options);
 }

@@ -2,195 +2,110 @@ import { Plugin } from 'vite';
 import { ComponentScanner } from './componentScanner';
 import { createExpressServer } from './server';
 import { transformJSXWithAttributes } from './jsxTransform';
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
-import { resolve } from 'path';
-import express from 'express';
 import { setPagesDir } from './fileApiPlugin';
-import { spawn } from 'child_process';
+import { resolve, relative, sep } from 'path';
+import type { PluginOptions } from './types';
 
-export interface PluginOptions {
-  enableDataCode?: boolean;
-  enableComponentRoutes?: boolean;
-  rootDir?: string;
-  pagesDir?: string;
-  componentsDir?: string;
-}
-
-export function airiotPlugin(options: PluginOptions = {}): Plugin {
-  console.log('[vite-plugin-airiot] Plugin loading...');
-
+/**
+ * Vite 开发插件：
+ * 1. 编译期为 JSX 元素注入可溯源定位的 data-node-id（见 nodeId.ts / jsxTransform.ts）
+ * 2. 挂载 /__editor/* HTTP API（组件扫描、文件读写、安装、构建等）
+ *
+ * 仅在开发模式（vite serve）下生效，不影响生产构建。
+ */
+export function kesiPlugin(options: PluginOptions = {}): Plugin {
   const {
-    enableDataCode = true,
-    enableComponentRoutes = true,
+    enableNodeIds = true,
     rootDir,
     pagesDir = 'pages',
     componentsDir = 'components',
   } = options;
 
-  let scanner: ComponentScanner;
+  let scanner: ComponentScanner | undefined;
   let isDevelopment = true;
-  let viteRoot: string;
+  let viteRoot = '';
 
   return {
-    name: 'vite-plugin-airiot',
-    enforce: 'pre', // 在其他插件之前执行（特别是 React 插件）
+    name: '@kesi/vite-plugin',
+    enforce: 'pre', // 先于 React 等插件执行
 
-    config: (_config, { command }) => {
-      // 使用command来检测开发模式
+    config(_config, { command }) {
       isDevelopment = command === 'serve';
-      console.log('[vite-plugin-airiot] Config hook - command:', command, 'isDevelopment:', isDevelopment);
-
       return {
         server: {
-          // 确保CORS配置正确
           cors: true,
         },
       };
     },
 
     configureServer(server) {
-      console.log('[vite-plugin-airiot] configureServer called, command:', server.config.command);
-
-      // 保存 Vite 根目录供后续使用
       viteRoot = server.config.root;
 
-      // 计算根目录：如果用户提供了 rootDir，则使用它，否则使用 Vite 的 root
-      const resolvedRootDir = rootDir ? resolve(rootDir) : server.config.root;
-      console.log('[vite-plugin-airiot] Root directory:', resolvedRootDir);
-      console.log('[vite-plugin-airiot] Pages directory:', pagesDir);
-      console.log('[vite-plugin-airiot] Components directory:', componentsDir);
-
-      // 设置 fileApiPlugin 的 pages 目录
-      const pagesDirPath = resolve(resolvedRootDir, pagesDir);
-      setPagesDir(pagesDirPath, resolvedRootDir);
-      console.log('[vite-plugin-airiot] File API pages directory:', pagesDirPath);
+      // 计算根目录：优先使用用户提供的 rootDir，否则用 Vite root
+      const resolvedRootDir = rootDir ? resolve(rootDir) : viteRoot;
+      setPagesDir(resolve(resolvedRootDir, pagesDir), resolvedRootDir);
 
       scanner = new ComponentScanner(resolvedRootDir, pagesDir, componentsDir);
-
       const scanResult = scanner.scanAll();
-      console.log(`[vite-plugin-airiot] Found ${scanResult.components.length} components`);
-      console.log(`[vite-plugin-airiot] Found ${scanResult.pageComponents.length} page components`);
+      console.log(
+        `[@kesi/vite-plugin] Scanned ${scanResult.components.length} components (${scanResult.pageComponents.length} in ${pagesDir}/), root: ${resolvedRootDir}`
+      );
 
-      const expressApp = createExpressServer(scanner, server, {
-        enableDataCode,
-        enableComponentRoutes,
-        pagesDir,
-        componentsDir,
-      });
-
-      server.middlewares.use(expressApp);
-      console.log('[vite-plugin-airiot] HTTP API server initialized');
-
-      // 启动 opencode-ai
-      console.log('[vite-plugin-airiot] Starting opencode-ai in:', resolvedRootDir);
-      const opencode = spawn('opencode', ['serve', '--hostname', '0.0.0.0'], {
-        cwd: resolvedRootDir,
-        stdio: 'inherit',
-        shell: true,
-      });
-
-      opencode.on('error', (err) => {
-        console.warn('[vite-plugin-airiot] Failed to start opencode:', err.message);
-      });
-
-      opencode.on('exit', (code) => {
-        console.log('[vite-plugin-airiot] opencode exited with code:', code);
-      });
-
-      // 添加 /__air_editor 路径代理，访问 editor 项目的 dist 目录
-      const editorDistPath = resolve(__dirname, '../../editor/dist');
-      console.log('[vite-plugin-airiot] Setting up /__air_editor proxy to:', editorDistPath);
-
-      // 检查 dist 目录是否存在
-      if (existsSync(editorDistPath)) {
-        server.middlewares.use('/__air_editor', express.static(editorDistPath) as any);
-        console.log('[vite-plugin-airiot] Express static middleware initialized for /__air_editor');
-      } else {
-        console.warn('[vite-plugin-airiot] Editor dist directory not found:', editorDistPath);
-      }
+      // HTTP API 中间件（/__editor/*）
+      const middleware = createExpressServer(scanner, server);
+      server.middlewares.use(middleware);
     },
 
     transform(code, id) {
-      // 只在开发模式下处理
-      if (!isDevelopment) {
-        return null;
-      }
-      // 只处理jsx和tsx文件
-      if (!/\.(jsx|tsx)$/.test(id)) {
-        return null;
-      }
-      // 只处理pages目录中的文件
-      const relativeId = id.replace(viteRoot + '/', '');
-      if (!relativeId.startsWith(`${pagesDir}/`) && !relativeId.startsWith(`${pagesDir}\\`)) {
-        return null;
-      }
+      if (!isDevelopment || !enableNodeIds) return null;
+      if (!/\.(jsx|tsx)$/.test(id)) return null;
+      if (id.includes('node_modules')) return null;
+      if (!viteRoot) return null;
 
-      // 跳过node_modules
-      if (id.includes('node_modules')) {
-        return null;
-      }
+      // 只处理 pages 目录下的文件
+      const relativeId = relative(viteRoot, id).split(sep).join('/');
+      if (!relativeId.startsWith(`${pagesDir}/`)) return null;
 
-      // 如果启用data-code属性添加
-      if (enableDataCode) {
-        return addDataCodeAttributes(code, id);
-      }
-
-      return null;
+      return addNodeIdAttributes(code, relativeId);
     },
 
     handleHotUpdate({ file }) {
-      // 当文件变化时，重新扫描组件
-      if (isDevelopment && /\.(jsx|tsx)$/.test(file)) {
-        if (scanner) {
-          scanner.scanAll();
-        }
+      // 文件变化时重新扫描组件列表，保证 API 数据与磁盘一致
+      if (isDevelopment && /\.(jsx|tsx)$/.test(file) && scanner) {
+        scanner.scanAll();
       }
     },
 
     transformIndexHtml(html, ctx) {
-      // 只在开发模式下处理
-      if (!isDevelopment) {
-        return html;
-      }
-      // 检查是否是编辑器模式（通过 URL 参数或路径判断）
-      const path = ctx?.originalUrl || '';
-      const isEditorMode = path.includes('__editor_canvas') ||
-                          path.includes('__editor_preview');
-      if (!isEditorMode) {
-        return html;
-      }
+      if (!isDevelopment) return html;
 
-      // 修改 index.html 中的入口脚本路径
-      // 使用通配符匹配任何 script type="module" 标签
-      const modifiedHtml = html.replace(
+      // 编辑器画布/预览模式：把入口脚本替换为 Canvas.tsx（由宿主项目提供）
+      const url = ctx?.originalUrl || '';
+      const isEditorMode =
+        url.includes('__editor_canvas') || url.includes('__editor_preview');
+      if (!isEditorMode) return html;
+
+      return html.replace(
         /<script\s+type=["']module["'][^>]*src=["']([^"']+)["'][^>]*>/g,
-        () => {
-          return '<script type="module" src="/Canvas.tsx">';
-        }
+        () => '<script type="module" src="/Canvas.tsx">'
       );
-
-      return modifiedHtml;
     },
   };
 }
 
 /**
- * 为React组件添加data-code属性（使用AST转换）
- * @param code 源代码
- * @param id 文件路径
+ * 为 JSX 注入 data-node-id（Babel AST 转换），出错时返回原代码
  */
-function addDataCodeAttributes(
+function addNodeIdAttributes(
   code: string,
-  id: string
+  relativePath: string
 ): { code: string; map?: any } {
   try {
-    // 使用Babel AST转换，添加真实的data-code属性
-    return transformJSXWithAttributes(code, id);
+    return transformJSXWithAttributes(code, relativePath);
   } catch (error) {
-    // 如果出错，返回原代码
-    console.error('[vite-plugin-airiot] Error adding data-code:', error);
+    console.error('[@kesi/vite-plugin] Error adding data-node-id:', error);
     return { code };
   }
 }
 
-export default airiotPlugin;
+export default kesiPlugin;

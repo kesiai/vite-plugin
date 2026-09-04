@@ -1,61 +1,39 @@
-import { ComponentScanner, ComponentData } from './componentScanner';
+import { ComponentScanner } from './componentScanner';
 import { ViteDevServer } from 'vite';
 import fs from 'fs';
 import path from 'path';
 import { spawn } from 'child_process';
 import { fileApiPlugin, setScanner } from './fileApiPlugin';
 
-interface ServerOptions {
-  enableDataCode: boolean;
-  enableComponentRoutes: boolean;
-  pagesDir: string;
-  componentsDir: string;
-}
-
 type NextFunction = () => void;
 
-interface Request {
-  url?: string;
-  method?: string;
-  body?: any;
-}
-
-interface Response {
-  statusCode?: number;
-  setHeader?: (name: string, value: string) => void;
-  end?: (data?: string) => void;
-  json?: (data: any) => void;
-}
-
-export function createApiHandler(
-  scanner: ComponentScanner,
-  viteServer: ViteDevServer,
-  options: ServerOptions
-) {
-  // 将 scanner 实例传递给 fileApiPlugin
+/**
+ * /__editor/* API 处理器（Connect 兼容中间件）。
+ * 说明：本服务面向本地开发，未做鉴权，请勿暴露到公网。
+ */
+export function createApiHandler(scanner: ComponentScanner, viteServer: ViteDevServer) {
+  // 将 scanner 实例传递给 fileApiPlugin（文件变更后自动重扫）
   setScanner(scanner);
 
   return async (req: any, res: any, next: NextFunction) => {
-
-    // 只处理/__airiot开头的请求
-    if (!req.url?.startsWith('/__airiot')) {
+    // 只处理 /__editor 开头的请求
+    if (!req.url?.startsWith('/__editor')) {
       return next();
     }
 
-    // 解析JSON body
-    if (req.method === 'POST' && !req.body) {
+    // 解析 JSON body（GET 请求无 body）
+    if (['POST', 'DELETE', 'PUT'].includes(req.method) && !req.body) {
       req.body = await parseJsonBody(req);
     }
 
-    // 设置CORS头
+    // 设置基础响应头
     if (res.setHeader) {
-      res.setHeader('Content-Type', 'application/json');
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     }
 
-    // 处理OPTIONS请求
+    // 处理 CORS 预检
     if (req.method === 'OPTIONS') {
       res.statusCode = 200;
       if (res.end) res.end();
@@ -66,18 +44,20 @@ export function createApiHandler(
       const url = new URL(req.url!, `http://${req.headers?.host || 'localhost'}`);
       const pathname = url.pathname;
 
-      if(pathname === '/__airiot/file' && (req.method === 'GET' || req.method === 'POST' || req.method === 'DELETE')) {
+      // ==================== File API ====================
+
+      if (pathname === '/__editor/file' && ['GET', 'POST', 'DELETE'].includes(req.method)) {
         return fileApiPlugin(req, res);
       }
 
       // ==================== Components API ====================
 
-      if (pathname === '/__airiot/components' && req.method === 'GET') {
+      if (pathname === '/__editor/components' && req.method === 'GET') {
         const components = scanner.getComponents();
 
         sendJson(res, {
           success: true,
-          data: components.map(comp => ({
+          data: components.map((comp) => ({
             name: comp.name,
             dataCode: comp.dataCode,
             filePath: comp.relativePath,
@@ -89,10 +69,10 @@ export function createApiHandler(
 
       // ==================== UI API ====================
 
-      if (pathname === '/__airiot/ui' && req.method === 'GET') {
+      if (pathname === '/__editor/ui' && req.method === 'GET') {
         const pageComponents = scanner.getPageComponents();
 
-        const routes = pageComponents.map(comp => ({
+        const routes = pageComponents.map((comp) => ({
           component: comp.name,
           route: scanner.getComponentRoute(comp),
           filePath: comp.relativePath,
@@ -108,7 +88,7 @@ export function createApiHandler(
 
       // ==================== Routers API ====================
 
-      if (pathname === '/__airiot/routers' && req.method === 'GET') {
+      if (pathname === '/__editor/routers' && req.method === 'GET') {
         const routes = extractRoutes(viteServer.config.root);
 
         sendJson(res, {
@@ -118,7 +98,7 @@ export function createApiHandler(
         return;
       }
 
-      if (pathname === '/__airiot/routers' && req.method === 'POST') {
+      if (pathname === '/__editor/routers' && req.method === 'POST') {
         const routes = await getJsonBody(req);
 
         if (!Array.isArray(routes)) {
@@ -140,7 +120,7 @@ export function createApiHandler(
 
       // ==================== Status API ====================
 
-      if (pathname === '/__airiot/status' && req.method === 'GET') {
+      if (pathname === '/__editor/status' && req.method === 'GET') {
         const status = getRuntimeStatus(viteServer);
 
         sendJson(res, {
@@ -152,7 +132,7 @@ export function createApiHandler(
 
       // ==================== Install Package API ====================
 
-      if (pathname === '/__airiot/install-package' && req.method === 'POST') {
+      if (pathname === '/__editor/install-package' && req.method === 'POST') {
         const body = await getJsonBody(req);
         const { packageName } = body;
 
@@ -164,34 +144,17 @@ export function createApiHandler(
           return;
         }
 
-        // 设置 SSE 响应头
-        res.setHeader('Content-Type', 'text/event-stream');
-        res.setHeader('Cache-Control', 'no-cache');
-        res.setHeader('Connection', 'keep-alive');
-
-        // 发送开始事件
-        res.write(`data: ${JSON.stringify({ type: 'start', message: `开始安装包 ${packageName}...` })}\n\n`);
-
-        try {
-          await installPackageWithOutput(packageName, viteServer.config.root, (output) => {
-            // 发送输出事件
-            res.write(`data: ${JSON.stringify({ type: 'output', data: output })}\n\n`);
-          });
-
-          // 发送完成事件
-          res.write(`data: ${JSON.stringify({ type: 'complete', message: `包 ${packageName} 安装完成` })}\n\n`);
-        } catch (error: any) {
-          // 发送错误事件
-          res.write(`data: ${JSON.stringify({ type: 'error', message: error.message })}\n\n`);
-        }
-
-        res.end();
-        return;
+        return streamSubprocess(
+          res,
+          { type: 'start', message: `开始安装包 ${packageName}...` },
+          { type: 'complete', message: `包 ${packageName} 安装完成` },
+          (onOutput) => installPackageWithOutput(packageName, viteServer.config.root, onOutput)
+        );
       }
 
       // ==================== Install shadcn API ====================
 
-      if (pathname === '/__airiot/install-shadcn' && req.method === 'POST') {
+      if (pathname === '/__editor/install-shadcn' && req.method === 'POST') {
         const body = await getJsonBody(req);
         const { componentName } = body;
 
@@ -203,34 +166,17 @@ export function createApiHandler(
           return;
         }
 
-        // 设置 SSE 响应头
-        res.setHeader('Content-Type', 'text/event-stream');
-        res.setHeader('Cache-Control', 'no-cache');
-        res.setHeader('Connection', 'keep-alive');
-
-        // 发送开始事件
-        res.write(`data: ${JSON.stringify({ type: 'start', message: `开始安装 shadcn 组件 ${componentName}...` })}\n\n`);
-
-        try {
-          await installShadcnComponentWithOutput(componentName, viteServer.config.root, (output) => {
-            // 发送输出事件
-            res.write(`data: ${JSON.stringify({ type: 'output', data: output })}\n\n`);
-          });
-
-          // 发送完成事件
-          res.write(`data: ${JSON.stringify({ type: 'complete', message: `shadcn 组件 ${componentName} 安装完成` })}\n\n`);
-        } catch (error: any) {
-          // 发送错误事件
-          res.write(`data: ${JSON.stringify({ type: 'error', message: error.message })}\n\n`);
-        }
-
-        res.end();
-        return;
+        return streamSubprocess(
+          res,
+          { type: 'start', message: `开始安装 shadcn 组件 ${componentName}...` },
+          { type: 'complete', message: `shadcn 组件 ${componentName} 安装完成` },
+          (onOutput) => installShadcnComponentWithOutput(componentName, viteServer.config.root, onOutput)
+        );
       }
 
       // ==================== Modify Code API ====================
 
-      if (pathname === '/__airiot/modify-code' && req.method === 'POST') {
+      if (pathname === '/__editor/modify-code' && req.method === 'POST') {
         const body = await getJsonBody(req);
         const { componentName, modifications } = body;
 
@@ -251,11 +197,7 @@ export function createApiHandler(
         }
 
         try {
-          const result = await modifyComponentCode(
-            viteServer.config.root,
-            componentName,
-            modifications
-          );
+          const result = await modifyComponentCode(scanner, componentName, modifications);
 
           sendJson(res, {
             success: true,
@@ -272,23 +214,22 @@ export function createApiHandler(
 
       // ==================== Plugin Check API ====================
 
-      if (pathname === '/__airiot/plugin-check' && req.method === 'GET') {
-        // 检查当前项目是否安装了 vite-plugin-airiot
+      if (pathname === '/__editor/plugin-check' && req.method === 'GET') {
         sendJson(res, {
           success: true,
           data: {
             hasPlugin: true,
-            pluginName: 'vite-plugin-airiot',
+            pluginName: '@kesi/vite-plugin',
             version: '1.0.0',
-            message: 'Plugin is installed and active'
-          }
+            message: 'Plugin is installed and active',
+          },
         });
         return;
       }
 
       // ==================== Package JSON API ====================
 
-      if (pathname === '/__airiot/package-json' && req.method === 'GET') {
+      if (pathname === '/__editor/package-json' && req.method === 'GET') {
         try {
           const packageJsonPath = path.join(viteServer.config.root, 'package.json');
           if (fs.existsSync(packageJsonPath)) {
@@ -298,7 +239,7 @@ export function createApiHandler(
               data: {
                 dependencies: packageJson.dependencies || {},
                 devDependencies: packageJson.devDependencies || {},
-                hasAiriotClient: !!(packageJson.dependencies && packageJson.dependencies['@airiot/client']),
+                hasKesiClient: !!(packageJson.dependencies && packageJson.dependencies['@kesi/client']),
               },
             });
           } else {
@@ -316,37 +257,20 @@ export function createApiHandler(
         return;
       }
 
-      // ==================== Install AIRIOT Client API ====================
+      // ==================== Install Client API ====================
 
-      if (pathname === '/__airiot/install-airiot-client' && req.method === 'POST') {
-        // 设置 SSE 响应头
-        res.setHeader('Content-Type', 'text/event-stream');
-        res.setHeader('Cache-Control', 'no-cache');
-        res.setHeader('Connection', 'keep-alive');
-
-        // 发送开始事件
-        res.write(`data: ${JSON.stringify({ type: 'start', message: '开始安装 @airiot/client...' })}\n\n`);
-
-        try {
-          await installPackageWithOutput('@airiot/client', viteServer.config.root, (output) => {
-            // 发送输出事件
-            res.write(`data: ${JSON.stringify({ type: 'output', data: output })}\n\n`);
-          });
-
-          // 发送完成事件
-          res.write(`data: ${JSON.stringify({ type: 'complete', message: '@airiot/client 安装完成' })}\n\n`);
-        } catch (error: any) {
-          // 发送错误事件
-          res.write(`data: ${JSON.stringify({ type: 'error', message: error.message })}\n\n`);
-        }
-
-        res.end();
-        return;
+      if (pathname === '/__editor/install-client' && req.method === 'POST') {
+        return streamSubprocess(
+          res,
+          { type: 'start', message: '开始安装 @kesi/client...' },
+          { type: 'complete', message: '@kesi/client 安装完成' },
+          (onOutput) => installPackageWithOutput('@kesi/client', viteServer.config.root, onOutput)
+        );
       }
 
-      // ==================== Init AIRIOT Config API ====================
+      // ==================== Init Config API ====================
 
-      if (pathname === '/__airiot/init-airiot-config' && req.method === 'POST') {
+      if (pathname === '/__editor/init-config' && req.method === 'POST') {
         const body = await getJsonBody(req);
         const { projectId } = body;
 
@@ -359,9 +283,8 @@ export function createApiHandler(
         }
 
         try {
-          // 创建或更新 airiot.config.ts
-          const configPath = path.join(viteServer.config.root, 'airiot.config.ts');
-          const configContent = `import { defineConfig } from '@airiot/client';
+          const configPath = path.join(viteServer.config.root, 'kesi.config.ts');
+          const configContent = `import { defineConfig } from '@kesi/client';
 
 export default defineConfig({
   projectId: '${projectId}',
@@ -387,38 +310,20 @@ export default defineConfig({
 
       // ==================== Build API ====================
 
-      if (pathname === '/__airiot/build' && req.method === 'POST') {
-        // 设置 SSE 响应头
-        res.setHeader('Content-Type', 'text/event-stream');
-        res.setHeader('Cache-Control', 'no-cache');
-        res.setHeader('Connection', 'keep-alive');
-
-        // 发送开始事件
-        res.write(`data: ${JSON.stringify({ type: 'start', message: '开始构建项目...' })}\n\n`);
-
-        try {
-          await runBuildWithOutput(viteServer.config.root, (output) => {
-            // 发送输出事件
-            res.write(`data: ${JSON.stringify({ type: 'output', data: output })}\n\n`);
-          });
-
-          // 发送完成事件
-          res.write(`data: ${JSON.stringify({ type: 'complete', message: '构建完成' })}\n\n`);
-        } catch (error: any) {
-          // 发送错误事件
-          res.write(`data: ${JSON.stringify({ type: 'error', message: error.message })}\n\n`);
-        }
-
-        res.end();
-        return;
+      if (pathname === '/__editor/build' && req.method === 'POST') {
+        return streamSubprocess(
+          res,
+          { type: 'start', message: '开始构建项目...' },
+          { type: 'complete', message: '构建完成' },
+          (onOutput) => runBuildWithOutput(viteServer.config.root, onOutput)
+        );
       }
 
-      // 404 - 未找到的API
+      // 404 - 未找到的 API
       sendJson(res, {
         success: false,
         error: 'API endpoint not found',
       }, 404);
-
     } catch (error: any) {
       sendJson(res, {
         success: false,
@@ -431,9 +336,9 @@ export default defineConfig({
 // ==================== Helper Functions ====================
 
 /**
- * 解析JSON请求体
+ * 解析 JSON 请求体
  */
-async function parseJsonBody(req: any): Promise<any> {
+function parseJsonBody(req: any): Promise<any> {
   return new Promise((resolve) => {
     let data = '';
     req.on('data', (chunk: any) => {
@@ -463,8 +368,36 @@ function sendJson(res: any, data: any, statusCode = 200) {
 }
 
 async function getJsonBody(req: any): Promise<any> {
-  // body已经在createApiHandler中预先解析了
+  // body 已在 createApiHandler 中预先解析
   return req.body || null;
+}
+
+/**
+ * 以 SSE 流式输出子进程执行结果，统一封装
+ * （install-package / install-shadcn / install-client / build 等）
+ */
+async function streamSubprocess(
+  res: any,
+  startEvent: { type: string; message?: string },
+  completeEvent: { type: string; message?: string },
+  run: (onOutput: (output: string) => void) => Promise<any>
+): Promise<void> {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+
+  res.write(`data: ${JSON.stringify(startEvent)}\n\n`);
+
+  try {
+    await run((output) => {
+      res.write(`data: ${JSON.stringify({ type: 'output', data: output })}\n\n`);
+    });
+    res.write(`data: ${JSON.stringify(completeEvent)}\n\n`);
+  } catch (error: any) {
+    res.write(`data: ${JSON.stringify({ type: 'error', message: error.message })}\n\n`);
+  }
+
+  res.end();
 }
 
 function extractRoutes(root: string): any[] {
@@ -517,7 +450,7 @@ function getRuntimeStatus(viteServer: ViteDevServer): any {
 }
 
 /**
- * 安装npm包（带输出回调）
+ * 安装 npm 包（SSE 输出回调）
  */
 async function installPackageWithOutput(
   packageName: string,
@@ -531,22 +464,12 @@ async function installPackageWithOutput(
       env: { ...process.env, NODE_ENV: 'development' },
     });
 
-    npm.stdout?.on('data', (data) => {
-      const output = data.toString();
-      onOutput(output);
-    });
-
-    npm.stderr?.on('data', (data) => {
-      const output = data.toString();
-      onOutput(output);
-    });
+    npm.stdout?.on('data', (data) => onOutput(data.toString()));
+    npm.stderr?.on('data', (data) => onOutput(data.toString()));
 
     npm.on('close', (code) => {
       if (code === 0) {
-        resolve({
-          packageName,
-          success: true,
-        });
+        resolve({ packageName, success: true });
       } else {
         reject(new Error(`npm install failed with code ${code}`));
       }
@@ -559,44 +482,7 @@ async function installPackageWithOutput(
 }
 
 /**
- * 安装npm包
- */
-async function installPackage(packageName: string, root: string): Promise<any> {
-  return new Promise((resolve, reject) => {
-    const npm = spawn('npm', ['install', packageName, '--save', '--force'], {
-      cwd: root,
-      shell: true,
-      env: { ...process.env, NODE_ENV: 'development' },
-    });
-
-    let stdout = '';
-    let stderr = '';
-
-    npm.stdout?.on('data', (data) => {
-      stdout += data.toString();
-    });
-
-    npm.stderr?.on('data', (data) => {
-      stderr += data.toString();
-    });
-
-    npm.on('close', (code) => {
-      if (code === 0) {
-        resolve({
-          packageName,
-          success: true,
-          stdout,
-          stderr,
-        });
-      } else {
-        reject(new Error(`npm install failed with code ${code}: ${stderr}`));
-      }
-    });
-  });
-}
-
-/**
- * 安装shadcn/ui组件（带输出回调）
+ * 安装 shadcn/ui 组件（SSE 输出回调）
  */
 async function installShadcnComponentWithOutput(
   componentName: string,
@@ -609,22 +495,12 @@ async function installShadcnComponentWithOutput(
       shell: true,
     });
 
-    npx.stdout?.on('data', (data) => {
-      const output = data.toString();
-      onOutput(output);
-    });
-
-    npx.stderr?.on('data', (data) => {
-      const output = data.toString();
-      onOutput(output);
-    });
+    npx.stdout?.on('data', (data) => onOutput(data.toString()));
+    npx.stderr?.on('data', (data) => onOutput(data.toString()));
 
     npx.on('close', (code) => {
       if (code === 0) {
-        resolve({
-          componentName,
-          success: true,
-        });
+        resolve({ componentName, success: true });
       } else {
         reject(new Error(`shadcn install failed with code ${code}`));
       }
@@ -633,135 +509,44 @@ async function installShadcnComponentWithOutput(
 }
 
 /**
- * 安装shadcn/ui组件
- */
-async function installShadcnComponent(componentName: string, root: string): Promise<any> {
-  return new Promise((resolve, reject) => {
-    const npx = spawn('npx', ['shadcn-ui@latest', 'add', componentName], {
-      cwd: root,
-      shell: true,
-    });
-
-    let stdout = '';
-    let stderr = '';
-
-    npx.stdout?.on('data', (data) => {
-      stdout += data.toString();
-    });
-
-    npx.stderr?.on('data', (data) => {
-      stderr += data.toString();
-    });
-
-    npx.on('close', (code) => {
-      if (code === 0) {
-        resolve({
-          componentName,
-          success: true,
-          stdout,
-          stderr,
-        });
-      } else {
-        reject(new Error(`shadcn install failed with code ${code}: ${stderr}`));
-      }
-    });
-  });
-}
-
-/**
- * 扫描所有组件（辅助函数）
- */
-function scanComponents(root: string): ComponentData[] {
-  const components: ComponentData[] = [];
-
-  function scanDir(dir: string, baseDir = '') {
-    if (!fs.existsSync(dir)) return;
-
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
-
-    for (const entry of entries) {
-      const fullPath = path.join(dir, entry.name);
-
-      if (entry.isDirectory()) {
-        if (entry.name !== 'node_modules' && !entry.name.startsWith('.') && entry.name !== 'dist') {
-          scanDir(fullPath, baseDir || entry.name);
-        }
-      } else if (/\.(jsx|tsx)$/.test(entry.name)) {
-        try {
-          const content = fs.readFileSync(fullPath, 'utf-8');
-          const relativePath = path.relative(root, fullPath);
-
-          // 提取组件
-          const lines = content.split('\n');
-          lines.forEach((line, index) => {
-            const patterns = [
-              /^\s*(?:export\s+(?:default\s+)?function|function)\s+([A-Z][a-zA-Z0-9_]*)/,
-              /^\s*(?:export\s+(?:default\s+)?)?const\s+([A-Z][a-zA-Z0-9_]*)\s*=\s*(?:\([^)]*\)\s*=>|function)/,
-            ];
-
-            for (const pattern of patterns) {
-              const match = line.match(pattern);
-              if (match) {
-                components.push({
-                  name: match[1],
-                  filePath: relativePath,
-                  relativePath,
-                  lineNumber: index + 1,
-                  dataCode: `${relativePath}:${index + 1}`,
-                  displayName: match[1],
-                });
-                break;
-              }
-            }
-          });
-        } catch (error) {
-          // 忽略读取错误
-        }
-      }
-    }
-  }
-
-  scanDir(root);
-  return components;
-}
-
-/**
- * 修改组件代码
+ * 修改组件代码：通过 scanner 找到组件文件（保证与磁盘一致），
+ * 再按 modifications 依次应用 replace / insert / append / prepend。
  */
 async function modifyComponentCode(
-  root: string,
+  scanner: ComponentScanner,
   componentName: string,
   modifications: any[]
 ): Promise<any> {
-  // 查找组件文件
-  const components = scanComponents(root);
-  const component = components.find(c => c.name === componentName);
+  const scan = scanner.scanAll();
+  const component = scan.components.find((c) => c.name === componentName);
 
   if (!component) {
     throw new Error(`Component ${componentName} not found`);
   }
 
-  const filePath = path.join(root, component.filePath);
+  const filePath = component.filePath;
   let content = fs.readFileSync(filePath, 'utf-8');
 
-  // 应用修改
   for (const mod of modifications) {
     switch (mod.type) {
       case 'replace':
         content = content.replace(new RegExp(mod.search, 'g'), mod.replace);
         break;
-      case 'insert':
+      case 'insert': {
         const lines = content.split('\n');
         const lineIndex = Math.max(0, Math.min(mod.line - 1, lines.length));
         lines.splice(lineIndex, 0, mod.content);
         content = lines.join('\n');
         break;
+      }
       case 'append':
         content += `\n${mod.content}`;
         break;
       case 'prepend':
         content = `${mod.content}\n${content}`;
         break;
+      default:
+        throw new Error(`Unsupported modification type: ${mod.type}`);
     }
   }
 
@@ -769,14 +554,14 @@ async function modifyComponentCode(
 
   return {
     componentName,
-    filePath: component.filePath,
+    filePath: component.relativePath,
     modifications: modifications.length,
     success: true,
   };
 }
 
 /**
- * 执行构建（带输出回调）
+ * 执行构建（SSE 输出回调）
  */
 async function runBuildWithOutput(
   root: string,
@@ -788,21 +573,12 @@ async function runBuildWithOutput(
       shell: true,
     });
 
-    npm.stdout?.on('data', (data) => {
-      const output = data.toString();
-      onOutput(output);
-    });
-
-    npm.stderr?.on('data', (data) => {
-      const output = data.toString();
-      onOutput(output);
-    });
+    npm.stdout?.on('data', (data) => onOutput(data.toString()));
+    npm.stderr?.on('data', (data) => onOutput(data.toString()));
 
     npm.on('close', (code) => {
       if (code === 0) {
-        resolve({
-          success: true,
-        });
+        resolve({ success: true });
       } else {
         reject(new Error(`Build failed with code ${code}`));
       }
@@ -810,46 +586,7 @@ async function runBuildWithOutput(
   });
 }
 
-/**
- * 执行构建
- */
-async function runBuild(root: string): Promise<any> {
-  return new Promise((resolve, reject) => {
-    const npm = spawn('npm', ['run', 'build'], {
-      cwd: root,
-      shell: true,
-    });
-
-    let stdout = '';
-    let stderr = '';
-
-    npm.stdout?.on('data', (data) => {
-      stdout += data.toString();
-    });
-
-    npm.stderr?.on('data', (data) => {
-      stderr += data.toString();
-    });
-
-    npm.on('close', (code) => {
-      if (code === 0) {
-        resolve({
-          success: true,
-          stdout,
-          stderr,
-        });
-      } else {
-        reject(new Error(`Build failed with code ${code}: ${stderr}`));
-      }
-    });
-  });
-}
-
-export function createExpressServer(
-  scanner: ComponentScanner,
-  viteServer: ViteDevServer,
-  options: ServerOptions
-) {
-  // 这个函数现在返回一个兼容Connect的中间件函数
-  return createApiHandler(scanner, viteServer, options);
+export function createExpressServer(scanner: ComponentScanner, viteServer: ViteDevServer) {
+  // 返回兼容 Connect 的中间件函数
+  return createApiHandler(scanner, viteServer);
 }

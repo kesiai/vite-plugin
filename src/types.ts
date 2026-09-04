@@ -1,15 +1,9 @@
 export interface PluginOptions {
   /**
-   * 是否启用 data-code 属性添加
+   * 是否在开发模式为 JSX 元素注入 data-node-id 定位标记
    * @default true
    */
-  enableDataCode?: boolean;
-
-  /**
-   * 是否启用组件展示路由
-   * @default true
-   */
-  enableComponentRoutes?: boolean;
+  enableNodeIds?: boolean;
 
   /**
    * 项目根目录（绝对路径或相对于 process.cwd() 的相对路径）
@@ -28,20 +22,4 @@ export interface PluginOptions {
    * @default 'components'
    */
   componentsDir?: string;
-}
-
-export interface ComponentInfo {
-  path: string;
-  lineNumber: number;
-  dataCode: string;
-}
-
-export interface RouteInfo {
-  path: string;
-  component: string;
-  filePath: string;
-}
-
-export interface AirlotConfig {
-  routes?: RouteInfo[];
 }

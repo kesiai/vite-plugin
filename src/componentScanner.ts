@@ -96,12 +96,16 @@ export class ComponentScanner {
       const isInPages = relativePath.startsWith(`${this.pagesDir}/`) || relativePath.startsWith(`${this.pagesDir}\\`);
 
       if (isInPages) {
+        const pageName = path.basename(filePath, path.extname(filePath));
+        const firstComponent = components[0];
         this.pageComponentsCache.push({
-          name: path.basename(filePath, path.extname(filePath)),
+          name: pageName,
           filePath,
           relativePath,
-          displayName: path.basename(filePath, path.extname(filePath)),
-        } as any);
+          lineNumber: firstComponent?.lineNumber ?? 1,
+          dataCode: firstComponent?.dataCode ?? `${relativePath}:1`,
+          displayName: pageName,
+        });
       }
 
       this.componentsCache.set(filePath, components);
@@ -180,7 +184,7 @@ export class ComponentScanner {
    */
   getComponentRoute(component: ComponentData): string {
     // 将文件路径转换为路由路径
-    // 例如: pages/dashboard/Dashboard.tsx -> /airiot/components/dashboard/Dashboard
+    // 例如: pages/dashboard/Dashboard.tsx -> /kesi/components/dashboard/Dashboard
     const routePath = component.relativePath
       .replace(/\.(jsx|tsx)$/, '')
       .replace(/\\/g, '/')
@@ -188,7 +192,7 @@ export class ComponentScanner {
       .filter(segment => segment !== this.pagesDir && segment !== this.componentsDir)
       .join('/');
 
-    return `/airiot/components/${routePath}`;
+    return `/kesi/components/${routePath}`;
   }
 
   /**

@@ -1,274 +1,195 @@
-# vite-plugin-airiot
+# @kesi/vite-plugin
 
-一个强大的 Vite 开发插件，为 React 项目提供组件代码追踪、可视化展示和丰富的开发工具 API。
+一个面向 React 项目的 Vite 开发插件：在开发模式下为 JSX 注入**可溯源定位的 `data-node-id`**，并提供组件扫描、文件读写、依赖安装等 HTTP API（挂载于 `/__editor/*`），配合 Canvas 预览实现"可视化点选 → 源码精确定位 → AI 修改"的开发闭环。
+
+> ⚠️ 仅在开发模式（`vite serve`）下生效，不影响生产构建。
 
 ## 功能特性
 
-### 1. 自动添加 data-code 属性
-在开发模式下，自动为每个 React 组件的根元素添加 `data-code` 属性：
-- 使用 Babel AST 在编译时转换代码
-- 零运行时开销
-- 包含组件文件的相对路径和起始行号
-- 格式：`"relative/path/to/Component.jsx:lineNumber"`
+### 1. data-node-id 源码定位标记（编译期注入）
 
-**转换示例：**
+开发模式下，插件用 Babel AST 转换，为每个 JSX 元素的开标签自动注入 `data-node-id`。它不是随机的自增 id，而是**可解码的源码位置信息**：
+
+```
+data-node-id = "node-" + base64url( JSON )
+```
+
+解码后的 JSON（`NodeSourceSpan`）包含元素在源码中的精确跨度：
+
+| 字段 | 含义 |
+|---|---|
+| `file` | 相对项目根目录的源码路径（POSIX 分隔符，无前导 `/`） |
+| `startLine` / `startCol` | 起始标签 `<tag` 的行号（1 起）与列号（0 起） |
+| `endLine` / `endCol` | 结束标签 `</tag>` 的起始行列（自闭合元素取标签自身结束位置） |
+
+**示例**
+
+转换前：
+
 ```tsx
-// 转换前
 export function Dashboard() {
-  return <div className="p-4">Dashboard</div>
-}
-
-// 转换后
-export function Dashboard() {
-  return <div className="p-4" data-code="pages/Dashboard.tsx:1">Dashboard</div>
+  return (
+    <div className="p-4">Dashboard</div>
+  );
 }
 ```
 
-### 2. 组件展示路由
-为 `pages` 和 `blocks` 目录下的 TSX 组件自动生成展示页面：
-- 使用 React Router 管理路由
-- 路由格式：`/airiot/components/{relative/path/to/Component}`
-- 支持组件预览和调试
-- 内置组件浏览器和查看器
+转换后（`id` 为示意，实际是 base64url）：
 
-### 3. HTTP API 接口
+```tsx
+export function Dashboard() {
+  return (
+    <div className="p-4" data-node-id="node-eyJmaWxlIjoicGFnZXMvZGFzaGJvYXJkL0Rhc2hib2FyZC50c3giLCJzdGFydExpbmUiOjMsInN0YXJ0Q29sIjo0LCJlbmRMaW5lIjo1LCJlbmRDb2wiOjN9">Dashboard</div>
+  );
+}
+```
 
-| API路径 | 方法 | 功能 |
-|---------|------|------|
-| `/__airiot/components` | GET | 获取所有组件的data-code信息 |
-| `/__airiot/ui` | GET | 获取组件的路由列表 |
-| `/__airiot/status` | GET | 获取服务器运行状态 |
-| `/__airiot/routers` | GET/POST | 获取/更新路由配置 |
-| `/__airiot/install-package` | POST | 安装npm包 |
-| `/__airiot/install-shadcn` | POST | 安装shadcn/ui组件 |
-| `/__airiot/modify-code` | POST | 修改组件代码 |
-| `/__airiot/build` | POST | 执行项目构建 |
+**解码**（插件导出 `decodeNodeId`）：
+
+```js
+import { decodeNodeId } from '@kesi/vite-plugin';
+
+const id = el.dataset.nodeId;          // 从 DOM 上取到
+const span = decodeNodeId(id);
+// => { file: 'pages/dashboard/Dashboard.tsx', startLine: 3, startCol: 4, endLine: 5, endCol: 3 }
+// 拿到后即可在源码中打开 file，按 start~end 的跨度修改代码/属性
+```
+
+**设计目的**：编辑器 / AI 工具拿到任意 DOM 节点后，解码即可定位到源码中该组件/元素的起止标签，从而精确修改代码与属性。注意列号遵循 Babel AST 约定（0 起、按 UTF-16 码元计数），行号 1 起。
+
+### 2. 组件扫描
+
+- 启动时扫描项目根目录下的 `.tsx/.jsx`，识别 React 组件定义（函数声明 / 箭头函数 / 函数表达式 / `React.forwardRef`）
+- 页面组件限定在 `pages/` 目录（相对于项目根目录，不在 `src` 内）
+- 文件变化（HMR / 文件 API 写入）时自动重扫，保证 API 数据与磁盘一致
+
+### 3. HTTP API（开发服务器内嵌）
+
+以 `/__editor/*` 提供 REST 接口，完整端点见下方 [API 参考](#api-参考)。
+
+### 4. 可视化预览
+
+宿主项目提供 `/Canvas.tsx` 入口时，访问 `__editor_canvas` / `__editor_preview` 路径可进入画布模式：iframe 点选高亮、`postMessage` 通知选中/拖拽、`NODE_DRAG_END` 上报位移
 
 ## 安装
 
 ```bash
-npm install vite-plugin-airiot -D
+npm install @kesi/vite-plugin -D
 ```
 
 ## 使用
-
-### 基本配置
 
 ```typescript
 // vite.config.ts
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
-import airiot from 'vite-plugin-airiot'
+import kesi from '@kesi/vite-plugin'
 
 export default defineConfig({
   plugins: [
     react(),
-    airiot({
-      // 可选配置
-      enableDataCode: true,              // 启用 data-code 属性（默认：true）
-      enableComponentRoutes: true,        // 启用组件展示路由（默认：true）
-      scanDirectories: ['pages', 'blocks'] // 要扫描的目录（默认：['pages', 'blocks']）
+    kesi({
+      enableNodeIds: true,        // 启用 data-node-id 注入（默认：true）
+      rootDir: undefined,         // 项目根目录（默认：vite root）
+      pagesDir: 'pages',          // 页面目录（默认：'pages'）
+      componentsDir: 'components' // 组件目录（默认：'components'）
     })
   ]
 })
 ```
 
-### 项目结构
+### 项目结构要求
 
 ```
 project-root/
-├── pages/              # 页面组件目录
+├── pages/              # 页面组件目录（必须位于项目根目录，不在 src 内）
 │   ├── dashboard/
 │   │   └── Dashboard.tsx
 │   └── users/
 │       └── Users.tsx
-├── blocks/             # UI组件目录
-│   └── ui/
-│       ├── Button.tsx
-│       └── Card.tsx
+├── blocks/             # （可选）其他组件目录
 ├── src/
 │   └── App.tsx
 ├── vite.config.ts
 └── package.json
 ```
 
-**重要：** `pages` 和 `blocks` 目录应在项目根目录下，不在 `src` 目录内。
+## API 参考
 
-## API 使用示例
+| API 路径 | 方法 | 功能 |
+|---|---|---|
+| `/__editor/components` | GET | 获取所有组件的扫描信息（名称/dataCode/文件/行号） |
+| `/__editor/ui` | GET | 获取页面组件及展示路由列表 |
+| `/__editor/routers` | GET / POST | 获取 / 更新路由配置文件状态 |
+| `/__editor/status` | GET | 获取 dev server 运行状态 |
+| `/__editor/file` | GET | 页面文件列表（递归 `pages/`） |
+| `/__editor/file` | POST | 文件操作，`action` 为 `read` / `save` / `create` |
+| `/__editor/file` | DELETE | 删除页面文件（body: `{pageName}`） |
+| `/__editor/plugin-check` | GET | 插件状态自检 |
+| `/__editor/package-json` | GET | 读取宿主 package.json 依赖信息（含 `hasKesiClient`） |
+| `/__editor/install-package` | POST | 安装 npm 包（SSE 流式输出） |
+| `/__editor/install-shadcn` | POST | 安装 shadcn/ui 组件（SSE 流式输出） |
+| `/__editor/install-client` | POST | 安装 `@kesi/client`（SSE 流式输出） |
+| `/__editor/init-config` | POST | 生成 `kesi.config.ts`（写入 projectId） |
+| `/__editor/modify-code` | POST | 按组件名找到文件并应用修改 |
+| `/__editor/build` | POST | 执行 `npm run build`（SSE 流式输出） |
 
-### 1. 获取所有组件
+### 文件 API 约定
 
-```bash
-curl http://localhost:5173/__airiot/components
-```
-
-**响应：**
-```json
-{
-  "success": true,
-  "data": [
-    {
-      "name": "Dashboard",
-      "dataCode": "pages/dashboard/Dashboard.tsx:1",
-      "filePath": "pages/dashboard/Dashboard.tsx",
-      "lineNumber": 1
-    }
-  ]
-}
-```
-
-### 2. 获取组件路由
+`pageName` 为相对 `pages/` 目录的路径（可含子目录，如 `dashboard/Dashboard`，可带或不带扩展名）：
 
 ```bash
-curl http://localhost:5173/__airiot/ui
-```
-
-**响应：**
-```json
-{
-  "success": true,
-  "data": [
-    {
-      "component": "Dashboard",
-      "route": "/airiot/components/dashboard/Dashboard",
-      "filePath": "pages/dashboard/Dashboard.tsx",
-      "lineNumber": 1
-    }
-  ]
-}
-```
-
-### 3. 修改组件代码
-
-```bash
-curl -X POST http://localhost:5173/__airiot/modify-code \
+# 读取
+curl http://localhost:5173/__editor/file \
   -H "Content-Type: application/json" \
-  -d '{
-    "componentName": "Dashboard",
-    "modifications": [
-      {
-        "type": "append",
-        "content": "// Modified by API"
-      }
-    ]
-  }'
-```
+  -d '{"action":"read","pageName":"dashboard/Dashboard"}'
 
-**修改类型：**
-- `append`: 在文件末尾添加内容
-- `prepend`: 在文件开头添加内容
-- `insert`: 在指定行插入内容
-- `replace`: 替换匹配的内容（支持正则）
-
-### 4. 安装npm包
-
-```bash
-curl -X POST http://localhost:5173/__airiot/install-package \
+# 保存（覆盖）
+curl http://localhost:5173/__editor/file \
   -H "Content-Type: application/json" \
-  -d '{"packageName":"axios"}'
-```
+  -d '{"action":"save","pageName":"dashboard/Dashboard","content":"..."}'
 
-### 5. 安装shadcn/ui组件
-
-```bash
-curl -X POST http://localhost:5173/__airiot/install-shadcn \
+# 创建
+curl http://localhost:5173/__editor/file \
   -H "Content-Type: application/json" \
-  -d '{"componentName":"button"}'
+  -d '{"action":"create","pageName":"dashboard/NewPage"}'
+
+# 删除
+curl -X DELETE http://localhost:5173/__editor/file \
+  -H "Content-Type: application/json" \
+  -d '{"pageName":"dashboard/OldPage"}'
 ```
 
-### 6. 执行构建
+### modify-code 修改类型
 
-```bash
-curl -X POST http://localhost:5173/__airiot/build
-```
-
-### 7. 检查运行状态
-
-```bash
-curl http://localhost:5173/__airiot/status
-```
-
-## 组件展示UI
-
-启动开发服务器后，访问：
-```
-http://localhost:5173/airiot/components
-```
-
-### 功能
-- 🔍 实时搜索过滤组件
-- 📊 卡片式布局展示
-- 📝 显示组件详细信息（文件路径、行号、data-code）
-- 🔗 点击预览组件
-- ⬅️ 返回导航
-
-## 技术实现
-
-### data-code 属性添加
-
-使用 **Babel AST 转换**在编译时完成：
-
-1. 解析代码为AST（@babel/parser）
-2. 遍历AST识别组件定义（@babel/traverse）
-3. 在组件的根JSX元素添加data-code属性
-4. 重新生成代码（@babel/generator）
-
-**优点：**
-- ✅ 编译时完成，零运行时开销
-- ✅ 真实的DOM属性，浏览器可访问
-- ✅ 支持CSS选择器：`[data-code="pages/Dashboard.tsx:1"]`
-- ✅ 支持JavaScript访问：`element.dataset.code`
-- ✅ 调试友好，支持Source Map
-
-## 组件命名规范
-
-插件会自动识别以下格式的组件定义：
-
-1. **函数声明**
-```typescript
-export function Dashboard() {}
-function Dashboard() {}
-```
-
-2. **箭头函数**
-```typescript
-export const Dashboard = () => {}
-const Dashboard = () => {}
-```
-
-3. **函数表达式**
-```typescript
-export const Dashboard = function() {}
-const Dashboard = function() {}
-```
-
-**要求：** 组件名必须以大写字母开头才会被识别。
+- `append`: 文件末尾追加
+- `prepend`: 文件开头插入
+- `insert`: 在指定 `line`（1 起）插入 `content`
+- `replace`: 用正则 `search` 全局替换为 `replace`
 
 ## 工作原理
 
-### 1. 组件扫描
-- 扫描 `pages` 和 `blocks` 目录
-- 识别 React 组件定义
-- 提取组件名称、文件路径、行号
-- 支持热更新自动重新扫描
+### 代码转换（data-node-id）
 
-### 2. 代码转换
-- 使用 Vite 的 `transform` 钩子
-- 仅处理 `.jsx` 和 `.tsx` 文件
-- 仅在开发模式下生效
-- 不影响生产构建
+1. Vite `transform` 钩子命中开发模式 + `pages/` 下的 `.tsx/.jsx`
+2. `@babel/parser` 解析为 AST
+3. 遍历每个 `JSXElement`，取开标签起始位置与结束标签起始位置（自闭合元素取自身结束位置）
+4. `encodeNodeId()` 序列化为 base64url 字符串注入 `data-node-id`
+5. `@babel/generator` 重新生成代码（保留行列与注释）
 
-### 3. HTTP API
-- 在开发服务器中注入API中间件
-- 提供RESTful API接口
-- 支持CORS跨域访问
+**优点**：编译时完成零运行时开销；真实 DOM 属性，`querySelector('[data-node-id^="node-"]')` / `element.dataset.nodeId` 均可访问。
+
+### 组件扫描
+
+正则逐行识别组件定义（组件名须大写开头），维护内存缓存并在文件变化时重扫。
 
 ## 注意事项
 
-1. **仅开发模式**：插件仅在开发模式下生效，不影响生产构建
-2. **性能影响**：AST转换在编译时完成，运行时零开销
-3. **安全性**：API接口未做身份验证，仅在本地开发使用
-4. **目录要求**：`pages` 和 `blocks` 目录应在项目根目录
+1. **仅开发模式**：`command === 'serve'` 时才转换 / 挂载 API，不影响生产构建
+2. **仅限本地开发**：API 未做鉴权且可写文件、执行构建，请勿将 dev server 暴露到公网
+3. **目录要求**：`pages/` 目录位于项目根目录
+4. **Canvas 宿主**：画布模式需要宿主项目提供 `/Canvas.tsx`（通常从 `@kesi/vite-plugin/canvas` 引入再按需包装）
+5. **id 有效期**：`data-node-id` 编码的是注入时的源码位置；文件被编辑后 DOM 会随 HMR 重新渲染并携带新 id
 
 ## 开发
 
@@ -276,28 +197,26 @@ const Dashboard = function() {}
 # 安装依赖
 npm install
 
-# 构建
+# 构建（tsup 产出 JS + tsc 产出 .d.ts）
 npm run build
 
-# 监听模式
+# 监听模式（仅 JS，d.ts 需完整 build 或单独跑 tsc --watch）
 npm run dev
 
 # 类型检查
 npm run typecheck
 ```
 
-## 依赖
+## 导出
 
-- `@babel/parser` - 解析代码为AST
-- `@babel/traverse` - 遍历AST
-- `@babel/types` - AST节点类型
-- `@babel/generator` - 从AST生成代码
-- `express` - HTTP服务器（仅开发时）
+| 导出 | 说明 |
+|---|---|
+| `kesiPlugin` / 默认导出 / `kesi()` | Vite 插件入口 |
+| `PluginOptions` | 插件配置类型 |
+| `ComponentScanner` / `ComponentData` / `ScanResult` | 组件扫描器 |
+| `encodeNodeId` / `decodeNodeId` / `nodeIdToSpan` / `isNodeId` / `NodeSourceSpan` | data-node-id 编解码 |
+| `@kesi/vite-plugin/canvas` | 浏览器端预览画布组件 |
 
 ## 许可证
 
 MIT
-
-## 贡献
-
-欢迎提交 Issue 和 Pull Request！
