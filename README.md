@@ -1,36 +1,25 @@
 # @kesi/vite-plugin
 
-一个面向 React 项目的 Vite 开发插件：在开发模式下为 **`pages/` 下的 JSX** 注入**可溯源定位的 `data-node-id`**（每个元素）与**组件元信息 `data-node-name` / `data-node-file`**（页面里用到的组件），并提供组件扫描、文件读写、依赖安装等 HTTP API（挂载于 `/__editor/*`），配合 Canvas 预览实现"可视化点选 → 源码精确定位 → AI 修改"的开发闭环。
+一个面向 React 项目的 Vite 开发插件：在开发模式下为 **`pages/` 下的 JSX** 注入**可溯源定位的 `data-node-id`**（拿到它即可调用 `GET /__editor/node/{id}` 获得组件名/组件文件/属性等全部信息），并提供组件扫描、文件读写、依赖安装等 REST/HTTP API（挂载于 `/__editor/*`），配合 Canvas 预览实现"可视化点选 → 源码精确定位 → AI 修改"的开发闭环。
 
 > ⚠️ 仅在开发模式（`vite serve`）下生效，不影响生产构建。
 
 ## 功能特性
 
-### 1. 源码定位与组件元信息（编译期注入）
+### 1. data-node-id 源码定位（编译期注入）
 
-开发模式下，插件用 **yuku（@yuku-parser/wasm + @yuku-codegen/wasm）**解析/生成源码，**只处理 `pages/` 目录下的 `.tsx/.jsx`**（其它目录的 tsx 不做转换），为页面 JSX 注入两类属性：
-
-**a) `data-node-id`（页面里的每个 JSX 元素）** —— 可解码的源码位置信息：
+开发模式下，插件用 **yuku（@yuku-parser/wasm + @yuku-codegen/wasm）**解析/生成源码，**只处理 `pages/` 目录下的 `.tsx/.jsx`**（其它目录的 tsx 不做转换），为页面 JSX 注入唯一属性：
 
 ```
 data-node-id = "node-" + base64url( JSON )
 ```
 
-**b) `data-node-name` / `data-node-file`（页面里用到的自定义组件）** —— 组件元信息：
+`data-node-id` 记录元素写在哪个文件、开标签/结束标签的起止位置，可直接解码定位源码。
+**组件元信息（组件名、组件文件）不再注入 DOM**——拿到 `data-node-id` 后调用 REST 接口即可：
 
-- 对页面中的组件元素（`<Button>`、`<AlertDialogContent>`、`<Card>`…）注入：
-  - `data-node-name`：组件真实的导出名（如 `Button`，别名导入时取原名）
-  - `data-node-file`：**组件定义文件的路径（相对项目根目录，如 `src/components/ui/button.tsx`）**
-    —— 通过静态解析该组件的 import 绑定（支持 `@/` 等别名）定位，是组件自己的文件，
-    不是使用它的页面文件
-- 宿主元素（`<div>`/`<button>`…）只有 `data-node-id`，不标 name/file；
-- 来自 node_modules 的外部包组件（如 lucide 图标）不标注（不属于项目源码）；
-- 属性以 props 形式传给组件，组件/原始组件把多余 props 转发到自身根 DOM 时即出现在真实节点上
-  （Base UI 已实测透传），因此 shadcn/ui 这类包装组件渲染出的原生元素同样可被识别。
-
-```html
-<!-- 例：页面里使用了 shadcn 的 <Button>，渲染出的原生 <button> 会带有： -->
-<button data-node-name="Button" data-node-file="src/components/ui/button.tsx" ...>go</button>
+```
+GET /__editor/node/{nodeId}
+# => { nodeId, file, tag, componentName, componentFile, source, props, children, ast, ... }
 ```
 
 解码后的 JSON（`NodeSourceSpan`）包含元素在源码中的精确跨度：
@@ -198,8 +187,9 @@ curl -X DELETE http://localhost:5173/__editor/file \
 
 ## 文档
 
+- [EDITOR_INTEGRATION_GUIDE.md](docs/EDITOR_INTEGRATION_GUIDE.md)：**独立编辑器宿主集成指南**（iframe + 注入脚本 + API 实现完整编辑器的分步指导与示例代码，面向其它 AI agent）
 - [EDITOR_DESIGN.md](docs/EDITOR_DESIGN.md)：React 组件编辑器设计/实现/运行记录
-- [EDITOR_API.md](docs/EDITOR_API.md)：/__editor 页面编辑 API 详细参考
+- [EDITOR_API.md](docs/EDITOR_API.md)：/__editor REST API 完整参考
 
 ## 工作原理
 
@@ -209,8 +199,7 @@ curl -X DELETE http://localhost:5173/__editor/file \
 2. `@yuku-parser/wasm` 解析为 ESTree AST；收集文件内 import 绑定表
 3. 遍历每个 `JSXElement`：
    - 注入 `data-node-id`：开标签起始位置与结束标签起始位置（自闭合元素取自身结束位置），`encodeNodeId()` 序列化为 base64url
-   - 对自定义组件元素解析 import 绑定（含 `@/` 别名），定位组件定义文件并注入
-     `data-node-name` / `data-node-file`
+   - 仅注入 `data-node-id`；组件信息由 `/__editor/node/{id}` 查询获取
 4. `@yuku-codegen/wasm` 重新生成代码（pretty，保留注释与引号风格）
 
 **优点**：编译时完成零运行时开销；真实 DOM 属性，`querySelector('[data-node-id]')` / `element.dataset.nodeId` / `element.dataset.nodeName` / `element.dataset.nodeFile` 均可访问。
@@ -227,8 +216,7 @@ curl -X DELETE http://localhost:5173/__editor/file \
 2. **仅限本地开发**：API 未做鉴权且可写文件、执行构建，请勿将 dev server 暴露到公网
 3. **目录要求**：`pages/` 目录位于项目根目录
 4. **Canvas 宿主**：画布模式需要宿主项目提供 `/Canvas.tsx`（通常从 `@kesi/vite-plugin/canvas` 引入再按需包装）
-5. **标记有效期**：`data-node-id` 编码的是注入时的源码位置；`data-node-name/file` 同理。
-   文件被编辑后 DOM 会随 HMR 重新渲染并携带新标记
+5. **标记有效期**：`data-node-id` 编码的是注入时的源码位置；文件被编辑后 DOM 会随 HMR 重新渲染并携带新标记
 
 ## 开发
 

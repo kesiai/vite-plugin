@@ -1,14 +1,15 @@
 import { Plugin } from 'vite';
 import { ComponentScanner } from './componentScanner';
 import { createExpressServer } from './server';
-import { transformJSXWithAttributes, AliasEntry } from './jsxTransform';
+import { transformJSXWithAttributes } from './jsxTransform';
+import type { AliasEntry } from './editor/paths';
 import { setPagesDir } from './fileApiPlugin';
 import { resolve, relative, sep } from 'path';
 import type { PluginOptions } from './types';
 
 /**
  * Vite 开发插件：
- * 1. 编译期为 pages/ 下的本地 JSX 注入 data-node-id / data-node-name / data-node-file
+ * 1. 编译期为 pages/ 下的 JSX 注入 data-node-id（组件信息经 /__editor/node/{id} 获取）
  *    （见 nodeId.ts / jsxTransform.ts）
  * 2. 挂载 /__editor/* HTTP API（组件扫描、文件读写、安装、构建等）
  *
@@ -87,10 +88,7 @@ export function kesiPlugin(options: PluginOptions = {}): Plugin {
       const relativeId = relative(viteRoot, id).split(sep).join('/');
       if (!relativeId.startsWith(`${pagesDir}/`)) return null;
 
-      return addNodeAttributes(code, relativeId, {
-        rootDir: viteRoot,
-        aliases: viteAliases,
-      });
+      return addNodeAttributes(code, relativeId);
     },
 
     handleHotUpdate({ file }) {
@@ -118,16 +116,11 @@ export function kesiPlugin(options: PluginOptions = {}): Plugin {
 }
 
 /**
- * 为 pages 下 JSX 注入 data-node-id / data-node-name / data-node-file（Babel AST 转换），
- * 出错时返回原代码
+ * 为 pages 下 JSX 注入 data-node-id（yuku AST 转换），出错时返回原代码
  */
-function addNodeAttributes(
-  code: string,
-  relativePath: string,
-  options?: { rootDir: string; aliases: AliasEntry[] }
-): { code: string; map?: any } {
+function addNodeAttributes(code: string, relativePath: string): { code: string } {
   try {
-    return transformJSXWithAttributes(code, relativePath, options);
+    return transformJSXWithAttributes(code, relativePath);
   } catch (error) {
     console.error('[@kesi/vite-plugin] Error adding node attributes:', error);
     return { code };

@@ -24,6 +24,7 @@ export default defineConfig({
       '@': fileURLToPath(new URL('./src', import.meta.url)),
     },
   },
+  base: process.env.EDITOR_PROXY_BASE || '/',
   server: {
     port: 5199,
     strictPort: true,

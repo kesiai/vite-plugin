@@ -4,7 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { spawn } from 'child_process';
 import { fileApiPlugin, setScanner } from './fileApiPlugin';
-import { AliasEntry } from './jsxTransform';
+import type { AliasEntry } from './editor/paths';
 import { EditorError } from './editor/common';
 import { ResolveContext, readProjectFile, writeProjectFile, resolvePageRel } from './editor/paths';
 import {
