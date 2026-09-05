@@ -67,8 +67,12 @@ export function kesiPlugin(options: PluginOptions = {}): Plugin {
         `[@kesi/vite-plugin] Scanned ${scanResult.components.length} components (${scanResult.pageComponents.length} in ${pagesDir}/), root: ${resolvedRootDir}`
       );
 
-      // HTTP API 中间件（/__editor/*）
-      const middleware = createExpressServer(scanner, server);
+      // HTTP API 中间件（/__editor/*，含页面编辑接口）
+      const middleware = createExpressServer(scanner, server, {
+        rootDir: viteRoot,
+        pagesDir,
+        aliases: viteAliases,
+      });
       server.middlewares.use(middleware);
     },
 

@@ -8,8 +8,7 @@
 
 ### 1. 源码定位与组件元信息（编译期注入）
 
-开发模式下，插件用 Babel AST 转换，**只处理 `pages/` 目录下的 `.tsx/.jsx`**（其它目录的
-tsx 不做转换），为页面 JSX 注入两类属性：
+开发模式下，插件用 **yuku（@yuku-parser/wasm + @yuku-codegen/wasm）**解析/生成源码，**只处理 `pages/` 目录下的 `.tsx/.jsx`**（其它目录的 tsx 不做转换），为页面 JSX 注入两类属性：
 
 **a) `data-node-id`（页面里的每个 JSX 元素）** —— 可解码的源码位置信息：
 
@@ -75,7 +74,7 @@ const span = decodeNodeId(id);
 // 拿到后即可在源码中打开 file，按 start~end 的跨度修改代码/属性
 ```
 
-**设计目的**：编辑器 / AI 工具拿到任意 DOM 节点后，解码即可定位到源码中该组件/元素的起止标签，从而精确修改代码与属性。注意列号遵循 Babel AST 约定（0 起、按 UTF-16 码元计数），行号 1 起。
+**设计目的**：编辑器 / AI 工具拿到任意 DOM 节点后，解码即可定位到源码中该组件/元素的起止标签，从而精确修改代码与属性。注意列号遵循 AST 节点约定（0 起、按 UTF-16 码元计数），行号 1 起。
 
 ### 2. 组件扫描
 
@@ -154,6 +153,16 @@ project-root/
 | `/__editor/modify-code` | POST | 按组件名找到文件并应用修改 |
 | `/__editor/build` | POST | 执行 `npm run build`（SSE 流式输出） |
 
+**页面编辑与组件编辑器接口均为 REST 风格（REST API 完整文档见
+[EDITOR_API.md](docs/EDITOR_API.md)）**，资源示例：
+
+| 资源 | 示例 |
+|---|---|
+| 页面 Pages | `GET/POST /__editor/pages`；`GET/PUT/DELETE /__editor/pages/{pagePath}`；`…/tree`、`…/history`、`…/undo`、`…/redo`、`…/children` |
+| 节点 Node | `GET /__editor/node/{nodeId}`；`…/schema`；修改用 `POST …/props`、`POST …/children/text`、`POST …/children`；`DELETE /__editor/node/{nodeId}`（无 PUT，兼容仅 GET/POST 的服务器） |
+| 组件 schema | `GET /__editor/component-schemas?nodeName=&nodeFile=` |
+| 剪贴板 | `GET/POST /__editor/clipboard`；`POST /__editor/clipboard/apply` |
+
 ### 文件 API 约定
 
 `pageName` 为相对 `pages/` 目录的路径（可含子目录，如 `dashboard/Dashboard`，可带或不带扩展名）：
@@ -187,17 +196,22 @@ curl -X DELETE http://localhost:5173/__editor/file \
 - `insert`: 在指定 `line`（1 起）插入 `content`
 - `replace`: 用正则 `search` 全局替换为 `replace`
 
+## 文档
+
+- [EDITOR_DESIGN.md](docs/EDITOR_DESIGN.md)：React 组件编辑器设计/实现/运行记录
+- [EDITOR_API.md](docs/EDITOR_API.md)：/__editor 页面编辑 API 详细参考
+
 ## 工作原理
 
 ### 代码转换（源码标记注入）
 
 1. Vite `transform` 钩子命中开发模式 + `pages/` 下的 `.tsx/.jsx`（其它目录不转换）
-2. `@babel/parser` 解析为 AST；收集文件内 import 绑定表
+2. `@yuku-parser/wasm` 解析为 ESTree AST；收集文件内 import 绑定表
 3. 遍历每个 `JSXElement`：
    - 注入 `data-node-id`：开标签起始位置与结束标签起始位置（自闭合元素取自身结束位置），`encodeNodeId()` 序列化为 base64url
    - 对自定义组件元素解析 import 绑定（含 `@/` 别名），定位组件定义文件并注入
      `data-node-name` / `data-node-file`
-4. `@babel/generator` 重新生成代码（保留行列与注释）
+4. `@yuku-codegen/wasm` 重新生成代码（pretty，保留注释与引号风格）
 
 **优点**：编译时完成零运行时开销；真实 DOM 属性，`querySelector('[data-node-id]')` / `element.dataset.nodeId` / `element.dataset.nodeName` / `element.dataset.nodeFile` 均可访问。
 

@@ -4,16 +4,90 @@ import fs from 'fs';
 import path from 'path';
 import { spawn } from 'child_process';
 import { fileApiPlugin, setScanner } from './fileApiPlugin';
+import { AliasEntry } from './jsxTransform';
+import { EditorError } from './editor/common';
+import { ResolveContext, readProjectFile, writeProjectFile, resolvePageRel } from './editor/paths';
+import {
+  getPageTree,
+  getNodeSource,
+  setPageProps,
+  setPageChildren,
+  addPageComponent,
+  removePageComponent,
+  CopyResult,
+} from './editor/page';
+import { componentSchema } from './editor/schema';
+import { decodeNodeId } from './nodeId';
+import { PageHistory } from './editor/history';
+import { copyNodeSubtree, pasteNodeSubtree, applyHistory } from './editor/page';
 
 type NextFunction = () => void;
+
+/** 页面编辑类接口所需的上下文 */
+export interface EditorApiContext {
+  rootDir: string;
+  pagesDir: string;
+  aliases?: AliasEntry[];
+}
 
 /**
  * /__editor/* API 处理器（Connect 兼容中间件）。
  * 说明：本服务面向本地开发，未做鉴权，请勿暴露到公网。
  */
-export function createApiHandler(scanner: ComponentScanner, viteServer: ViteDevServer) {
+export function createApiHandler(
+  scanner: ComponentScanner,
+  viteServer: ViteDevServer,
+  editorCtx: EditorApiContext
+) {
   // 将 scanner 实例传递给 fileApiPlugin（文件变更后自动重扫）
   setScanner(scanner);
+
+  const ctx: ResolveContext = {
+    rootDir: editorCtx.rootDir,
+    aliases: editorCtx.aliases,
+  };
+  const pagesDir = editorCtx.pagesDir;
+  const history = new PageHistory();
+  let clipboard: CopyResult | null = null;
+
+  /** 读取一个页面文件文本（相对路径解析 + 存在性检查） */
+  const pageText = (page: string): { rel: string; text: string } => {
+    const rel = resolvePageRel(ctx, pagesDir, page);
+    return { rel, text: readProjectFile(ctx, rel) };
+  };
+
+  /** 统一执行编辑器动作并渲染成功/失败响应（错误信息完整透出） */
+  const runEditorAction = async (
+    res: any,
+    action: () => any
+  ): Promise<void> => {
+    try {
+      const data = await action();
+      sendJson(res, { success: true, data });
+    } catch (error: any) {
+      if (error instanceof EditorError) {
+        sendJson(
+          res,
+          { success: false, error: { code: error.code, message: error.message, detail: error.detail ?? undefined } },
+          error.status
+        );
+        return;
+      }
+      // 兜底：完整错误信息（含堆栈），便于排查
+      sendJson(
+        res,
+        {
+          success: false,
+          error: {
+            code: 'INTERNAL_ERROR',
+            message: error?.message ?? String(error),
+            detail: { stack: error?.stack ?? undefined },
+          },
+        },
+        500
+      );
+    }
+  };
 
   return async (req: any, res: any, next: NextFunction) => {
     // 只处理 /__editor 开头的请求
@@ -22,7 +96,7 @@ export function createApiHandler(scanner: ComponentScanner, viteServer: ViteDevS
     }
 
     // 解析 JSON body（GET 请求无 body）
-    if (['POST', 'DELETE', 'PUT'].includes(req.method) && !req.body) {
+    if (['POST', 'DELETE'].includes(req.method) && !req.body) {
       req.body = await parseJsonBody(req);
     }
 
@@ -44,10 +118,250 @@ export function createApiHandler(scanner: ComponentScanner, viteServer: ViteDevS
       const url = new URL(req.url!, `http://${req.headers?.host || 'localhost'}`);
       const pathname = url.pathname;
 
-      // ==================== File API ====================
+      // ==================== REST: Pages（页面资源） ====================
+      // 方法约定：查询 GET；新建 POST /pages；覆盖写 POST /pages/{page}/content；
+      // 删除 DELETE（修改类均用 POST，兼容只支持 GET/POST 的服务器/代理）
 
-      if (pathname === '/__editor/file' && ['GET', 'POST', 'DELETE'].includes(req.method)) {
-        return fileApiPlugin(req, res);
+      const pagesPrefix = '/__editor/pages';
+      const pageRestOf = (pathname: string) =>
+        decodeURIComponent(pathname.slice(pagesPrefix.length + 1));
+
+      // GET /__editor/pages —— 页面列表
+      if (pathname === pagesPrefix && req.method === 'GET') {
+        return runEditorAction(res, async () => ({ pages: listPages(ctx, pagesDir) }));
+      }
+
+      // POST /__editor/pages —— 新建页面 { path, template? }
+      if (pathname === pagesPrefix && req.method === 'POST') {
+        return runEditorAction(res, async () => {
+          const body = (await getJsonBody(req)) ?? {};
+          if (!body.path) throw new EditorError('MISSING_FIELDS', '缺少 path（页面名）', 400);
+          const rel = createPageFile(ctx, pagesDir, String(body.path), body.template);
+          scanner.scanAll();
+          return { page: rel };
+        });
+      }
+
+      // /__editor/pages/{pagePath} 及其子动作
+      if (pathname.startsWith(pagesPrefix + '/')) {
+        const rest = pageRestOf(pathname);
+
+        const tryPageAction = async (): Promise<boolean> => {
+          if (rest.endsWith('/tree') && req.method === 'GET') {
+            const rel = resolvePageRel(ctx, pagesDir, rest.slice(0, -5));
+            const text = readProjectFile(ctx, rel);
+            const tree = getPageTree(rel, text, ctx);
+            await runEditorAction(res, async () => ({ file: rel, tree }));
+            return true;
+          }
+          if (rest.endsWith('/content') && req.method === 'POST') {
+            const rel = resolvePageRel(ctx, pagesDir, rest.slice(0, -8));
+            const body = (await getJsonBody(req)) ?? {};
+            if (typeof body.content !== 'string') {
+              throw new EditorError('INVALID_CONTENT', 'content 必须是字符串', 400);
+            }
+            history.push(rel, readProjectFile(ctx, rel));
+            writeProjectFile(ctx, rel, body.content);
+            scanner.scanAll();
+            await runEditorAction(res, async () => ({ file: rel, saved: true }));
+            return true;
+          }
+          if (rest.endsWith('/children') && req.method === 'POST') {
+            const rel = resolvePageRel(ctx, pagesDir, rest.slice(0, -9));
+            const text = readProjectFile(ctx, rel);
+            const body = (await getJsonBody(req)) ?? {};
+            const result = addPageComponent(
+              rel,
+              text,
+              { nodeName: body.nodeName, nodeFile: body.nodeFile, props: body.props, childrenText: body.childrenText },
+              ctx,
+              history
+            );
+            scanner.scanAll();
+            await runEditorAction(res, async () => result);
+            return true;
+          }
+          if (rest.endsWith('/history') && req.method === 'GET') {
+            const rel = resolvePageRel(ctx, pagesDir, rest.slice(0, -8));
+            await runEditorAction(res, async () => ({ ...history.stats(rel), page: rel }));
+            return true;
+          }
+          if (rest.endsWith('/undo') && req.method === 'POST') {
+            const rel = resolvePageRel(ctx, pagesDir, rest.slice(0, -5));
+            const text = readProjectFile(ctx, rel);
+            const result = applyHistory(ctx, history, rel, text, 'undo');
+            scanner.scanAll();
+            await runEditorAction(res, async () => ({ ...result, page: rel }));
+            return true;
+          }
+          if (rest.endsWith('/redo') && req.method === 'POST') {
+            const rel = resolvePageRel(ctx, pagesDir, rest.slice(0, -5));
+            const text = readProjectFile(ctx, rel);
+            const result = applyHistory(ctx, history, rel, text, 'redo');
+            scanner.scanAll();
+            await runEditorAction(res, async () => ({ ...result, page: rel }));
+            return true;
+          }
+          return false;
+        };
+        if (await tryPageAction()) return;
+
+        // 页面文件本体：GET 读取 / DELETE 删除
+        const rel = resolvePageRel(ctx, pagesDir, rest);
+        if (req.method === 'GET') {
+          await runEditorAction(res, async () => ({ file: rel, content: readProjectFile(ctx, rel) }));
+          return;
+        }
+        if (req.method === 'DELETE') {
+          return runEditorAction(res, async () => {
+            deletePageFile(ctx, pagesDir, rel);
+            scanner.scanAll();
+            return { file: rel, deleted: true };
+          });
+        }
+        sendJson(
+          res,
+          { success: false, error: { code: 'METHOD_NOT_ALLOWED', message: '该页面资源仅支持 GET/DELETE；覆盖写请 POST /pages/{page}/content' } },
+          405
+        );
+        return;
+      }
+
+      // ==================== REST: Node（页面节点 / 组件资源） ====================
+
+      const nodePrefix = '/__editor/node/';
+      if (pathname.startsWith(nodePrefix)) {
+        const rest = decodeURIComponent(pathname.slice(nodePrefix.length));
+
+        const parseNodeRest = (restPath: string): { nodeId: string; action: string | null } => {
+          for (const suffix of ['/props', '/children/text', '/children', '/schema']) {
+            if (restPath.endsWith(suffix)) {
+              return { nodeId: restPath.slice(0, -suffix.length), action: suffix.slice(1) };
+            }
+          }
+          return { nodeId: restPath, action: null };
+        };
+        const { nodeId, action } = parseNodeRest(rest);
+        const { rel: file, text } = pageText(inferPageFromNode(nodeId));
+
+        // GET /__editor/node/{id} —— 节点源码 / 属性 / children / AST
+        if (action === null && req.method === 'GET') {
+          await runEditorAction(res, async () => getNodeSource(file, text, nodeId, ctx));
+          return;
+        }
+        // GET /__editor/node/{id}/schema —— 该组件节点的属性 schema
+        if (action === 'schema' && req.method === 'GET') {
+          return runEditorAction(res, async () => {
+            const info = getNodeSource(file, text, nodeId, ctx);
+            if (!info.componentName || !info.componentFile) {
+              throw new EditorError('NOT_A_COMPONENT', `节点 <${info.tag}> 不是自定义组件，无属性 schema`, 404);
+            }
+            const compText = readProjectFile(ctx, info.componentFile);
+            return componentSchema(compText, info.componentFile, info.componentName, ctx);
+          });
+        }
+        // POST /__editor/node/{id}/props —— 批量修改属性
+        if (action === 'props' && req.method === 'POST') {
+          return runEditorAction(res, async () => {
+            const body = (await getJsonBody(req)) ?? {};
+            const result = setPageProps(file, text, nodeId, body.props, ctx, history);
+            scanner.scanAll();
+            return result;
+          });
+        }
+        // POST /__editor/node/{id}/children/text —— 用文本替换 children
+        if (action === 'children/text' && req.method === 'POST') {
+          return runEditorAction(res, async () => {
+            const body = (await getJsonBody(req)) ?? {};
+            if (typeof body.text !== 'string') throw new EditorError('INVALID_CHILDREN', 'text 必须是字符串', 400);
+            const result = setPageChildren(file, text, nodeId, { text: body.text }, ctx, history);
+            scanner.scanAll();
+            return result;
+          });
+        }
+        // POST /__editor/node/{id}/children —— 插入组件子节点
+        if (action === 'children' && req.method === 'POST') {
+          return runEditorAction(res, async () => {
+            const body = (await getJsonBody(req)) ?? {};
+            const result = addPageComponent(
+              file,
+              text,
+              { parentNodeId: nodeId, nodeName: body.nodeName, nodeFile: body.nodeFile, props: body.props, childrenText: body.childrenText },
+              ctx,
+              history
+            );
+            scanner.scanAll();
+            return result;
+          });
+        }
+        // DELETE /__editor/node/{id} —— 删除节点
+        if (action === null && req.method === 'DELETE') {
+          return runEditorAction(res, async () => {
+            const result = removePageComponent(file, text, nodeId, ctx, history);
+            scanner.scanAll();
+            return result;
+          });
+        }
+        sendJson(
+          res,
+          { success: false, error: { code: 'METHOD_NOT_ALLOWED', message: `节点资源 ${rest} 不支持 ${req.method}（修改请用 POST）` } },
+          405
+        );
+        return;
+      }
+
+      // ==================== REST: Component Schemas（查询） ====================
+
+      if (pathname === '/__editor/component-schemas' && req.method === 'GET') {
+        return runEditorAction(res, async () => {
+          const nodeName = url.searchParams.get('nodeName');
+          const nodeFile = url.searchParams.get('nodeFile');
+          if (!nodeName || !nodeFile) {
+            throw new EditorError('MISSING_FIELDS', '缺少查询参数 nodeName 或 nodeFile', 400);
+          }
+          const fileRel = nodeFile.replace(/^\.?\//, '');
+          const compText = readProjectFile(ctx, fileRel);
+          return componentSchema(compText, fileRel, nodeName, ctx);
+        });
+      }
+
+      // ==================== REST: Clipboard ====================
+
+      if (pathname === '/__editor/clipboard' && req.method === 'GET') {
+        return runEditorAction(res, async () => ({
+          has: !!clipboard,
+          file: clipboard?.file ?? null,
+          tag: clipboard?.tag ?? null,
+        }));
+      }
+      if (pathname === '/__editor/clipboard' && req.method === 'POST') {
+        return runEditorAction(res, async () => {
+          const body = (await getJsonBody(req)) ?? {};
+          if (!body.nodeId) throw new EditorError('MISSING_FIELDS', '缺少 nodeId', 400);
+          const rel = inferPageFromNode(String(body.nodeId));
+          const { rel: file, text } = pageText(rel);
+          const copy = copyNodeSubtree(file, text, String(body.nodeId), ctx);
+          clipboard = copy;
+          return { nodeId: copy.nodeId, file: copy.file, tag: copy.tag, source: copy.source };
+        });
+      }
+      if (pathname === '/__editor/clipboard/apply' && req.method === 'POST') {
+        return runEditorAction(res, async () => {
+          const body = (await getJsonBody(req)) ?? {};
+          if (!clipboard) throw new EditorError('NO_CLIPBOARD', '剪贴板为空：请先复制节点（POST /__editor/clipboard）', 404);
+          const { rel: file, text } = pageText(body.page || clipboard.file);
+          const result = pasteNodeSubtree(
+            file,
+            text,
+            body.parentNodeId || undefined,
+            clipboard.element,
+            clipboard.file,
+            ctx,
+            history
+          );
+          scanner.scanAll();
+          return result;
+        });
       }
 
       // ==================== Components API ====================
@@ -586,7 +900,84 @@ async function runBuildWithOutput(
   });
 }
 
-export function createExpressServer(scanner: ComponentScanner, viteServer: ViteDevServer) {
+function listPages(ctx: ResolveContext, pagesDir: string): Array<{ name: string; path: string }> {
+  const rootAbs = path.resolve(ctx.rootDir, pagesDir);
+  const out: Array<{ name: string; path: string }> = [];
+  const walk = (dir: string, rel: string) => {
+    let entries: fs.Dirent[] = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+        walk(full, rel ? `${rel}/${entry.name}` : entry.name);
+      } else if (/\.(tsx|jsx)$/.test(entry.name)) {
+        const relName = rel ? `${rel}/${entry.name}` : entry.name;
+        out.push({ name: relName.replace(/\.(tsx|jsx)$/, ''), path: full });
+      }
+    }
+  };
+  if (fs.existsSync(rootAbs)) walk(rootAbs, '');
+  return out;
+}
+
+function createPageFile(ctx: ResolveContext, pagesDir: string, pageName: string, template?: string): string {
+  let rel = String(pageName).replace(/\\/g, '/').replace(/^\.?\//, '').replace(/^\/+/, '');
+  if (!rel.startsWith(pagesDir + '/')) rel = pagesDir + '/' + rel;
+  if (rel.includes('..')) throw new EditorError('INVALID_PAGE', `非法的页面路径：${pageName}`, 400);
+  const abs = path.resolve(ctx.rootDir, rel);
+  const finalPath = /\.(tsx|jsx)$/.test(abs) ? abs : `${abs}.tsx`;
+  if (fs.existsSync(finalPath)) {
+    throw new EditorError('PAGE_EXISTS', `页面已存在：${pageName}`, 409);
+  }
+  const base = (path.basename(finalPath).replace(/\.(tsx|jsx)$/, '') || 'Page').replace(/[^A-Za-z0-9_$]/g, '') || 'Page';
+  const content =
+    template ??
+    `import React from 'react';
+
+export default function ${base.charAt(0).toUpperCase() + base.slice(1)}() {
+  return (
+    <div className="p-8">
+      <h1 className="text-2xl font-bold mb-4">${pageName}</h1>
+      <p>Start editing to see magic happen!</p>
+    </div>
+  );
+}
+`;
+  fs.mkdirSync(path.dirname(finalPath), { recursive: true });
+  fs.writeFileSync(finalPath, content, 'utf8');
+  return path.relative(ctx.rootDir, finalPath).split(path.sep).join('/');
+}
+
+function deletePageFile(ctx: ResolveContext, pagesDir: string, rel: string): void {
+  const abs = path.resolve(ctx.rootDir, rel);
+  const pagesAbs = path.resolve(ctx.rootDir, pagesDir);
+  if (abs !== pagesAbs && !abs.startsWith(pagesAbs + path.sep)) {
+    throw new EditorError('INVALID_PAGE', `只能删除 ${pagesDir}/ 下的页面：${rel}`, 400);
+  }
+  try {
+    fs.unlinkSync(abs);
+  } catch (error: any) {
+    throw new EditorError('FILE_DELETE_ERROR', `删除页面失败：${error?.message ?? error}`, 500);
+  }
+}
+
+/** 从 node-id 推断所属页面文件 */
+function inferPageFromNode(nodeId: string): string {
+  const span = decodeNodeId(nodeId);
+  if (!span) throw new EditorError('INVALID_NODE_ID', `node-id 无法解码：${nodeId}`, 400);
+  return span.file;
+}
+
+export function createExpressServer(
+  scanner: ComponentScanner,
+  viteServer: ViteDevServer,
+  editorCtx: EditorApiContext
+) {
   // 返回兼容 Connect 的中间件函数
-  return createApiHandler(scanner, viteServer);
+  return createApiHandler(scanner, viteServer, editorCtx);
 }

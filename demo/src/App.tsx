@@ -1,151 +1,282 @@
-import { useState } from 'react';
-import { LayoutDashboardIcon, MousePointerClickIcon, UsersIcon } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
+import { LayoutDashboardIcon, TerminalSquareIcon, UsersIcon } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card';
-import { Separator } from '@/components/ui/separator';
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Toaster } from '@/components/ui/toast';
+import { Toaster, toast } from '@/components/ui/toast';
+import { nodeApi, addChildToPageRoot } from './editorApi';
 import { decodeNodeId } from './decodeNodeId';
-import Dashboard from '../pages/dashboard/Dashboard';
-import Users from '../pages/users/Users';
+import PageView from './PageView';
+import ApiConsole from './ApiConsole';
+import PropPanel from './PropPanel';
 
-const API_ENDPOINTS: Array<[string, string]> = [
-  ['components', '组件扫描'],
-  ['ui', '页面路由'],
-  ['status', '状态'],
-  ['file', 'pages 文件'],
-  ['package-json', 'package.json'],
-  ['plugin-check', '插件自检'],
+// ===== react-router 路由配置（页面下拉列表的数据来源） =====
+interface AppRoute {
+  path: string;
+  label: string;
+  file: string; // /__editor API 使用的页面相对路径
+  icon: typeof LayoutDashboardIcon;
+}
+
+const APP_ROUTES: AppRoute[] = [
+  { path: '/dashboard', label: '总览', file: 'dashboard/Dashboard', icon: LayoutDashboardIcon },
+  { path: '/users', label: '用户', file: 'users/Users', icon: UsersIcon },
+  { path: '/api', label: 'API', file: 'api', icon: TerminalSquareIcon },
 ];
 
+interface SelInfo {
+  id: string;
+  label: string;
+  sub?: string;
+}
+
+interface BoxRect {
+  top: number;
+  left: number;
+  width: number;
+  height: number;
+}
+
 export default function App() {
-  const [page, setPage] = useState<'dashboard' | 'users'>('dashboard');
-  const [nodeInfo, setNodeInfo] = useState('点击右侧页面中的任意元素，查看它的 data-node-id 与源码定位');
-  const [apiOut, setApiOut] = useState('');
+  const location = useLocation();
+  const pathname = location.pathname;
+  const route = APP_ROUTES.find((r) => r.path === pathname) ?? APP_ROUTES[0];
+  const isApi = pathname === '/api';
+  const pageFile = route?.file && !isApi ? route.file : 'dashboard/Dashboard';
 
-  const handleClick = (e: any) => {
-    const target = e.target as HTMLElement;
+  const [dropOpen, setDropOpen] = useState(false);
+  const [selected, setSelected] = useState<SelInfo | null>(null);
+  const [tick, setTick] = useState(0);
+  const previewRef = useRef<HTMLDivElement | null>(null);
+  /** 点中的那个 DOM 实例（迭代渲染时同 id 会有多个元素，必须记住具体是第几个） */
+  const anchorRef = useRef<HTMLElement | null>(null);
+  /** 点中的实例在同 id 元素列表中的序号（HMR 重挂载后按序号找回同一个实例） */
+  const selIndexRef = useRef<number | null>(null);
+  const [box, setBox] = useState<BoxRect | null>(null);
 
-    // “选中节点” = 最近的带 data-node-id 的元素（源码定位的锚点）
-    const idEl = target.closest('[data-node-id]') as HTMLElement | null;
-    if (!idEl) {
-      setNodeInfo('该元素没有注入标记（可能来自 node_modules 内部渲染）');
+  const refreshTick = () => setTick((t) => t + 1);
+
+  const clearSelection = () => {
+    anchorRef.current = null;
+    selIndexRef.current = null;
+    setSelected(null);
+    setBox(null);
+  };
+
+  // 路由切换（react-router）时清空选中状态
+  useEffect(() => {
+    clearSelection();
+    setDropOpen(false);
+  }, [pathname]);
+
+  const measure = useCallback(() => {
+    if (!selected || isApi || !previewRef.current) {
+      setBox(null);
       return;
     }
+    const container = previewRef.current;
+    let el = anchorRef.current && anchorRef.current.isConnected ? anchorRef.current : null;
+    if (!el) {
+      const matches = container.querySelectorAll<HTMLElement>(`[data-node-id="${selected.id}"]`);
+      if (matches.length > 0) {
+        const idx = selIndexRef.current ?? 0;
+        el = matches[Math.min(idx, matches.length - 1)];
+      }
+    }
+    if (!el) {
+      setBox(null);
+      return;
+    }
+    const cRect = container.getBoundingClientRect();
+    const r = el.getBoundingClientRect();
+    setBox({
+      top: r.top - cRect.top + container.scrollTop,
+      left: r.left - cRect.left + container.scrollLeft,
+      width: r.width,
+      height: r.height,
+    });
+  }, [selected, isApi]);
 
-    const id = idEl.dataset.nodeId ?? '';
+  useEffect(() => {
+    if (isApi) {
+      setBox(null);
+      return;
+    }
+    measure();
+    const onResize = () => requestAnimationFrame(measure);
+    window.addEventListener('resize', onResize);
+    previewRef.current?.addEventListener('scroll', onResize, true);
+    return () => {
+      window.removeEventListener('resize', onResize);
+      previewRef.current?.removeEventListener('scroll', onResize, true);
+    };
+  }, [measure, isApi, selected?.id, tick]);
+
+  // HMR 重挂载后重试定位外框
+  useEffect(() => {
+    if (!selected) return;
+    let tries = 0;
+    const timer = setInterval(() => {
+      tries += 1;
+      measure();
+      if (tries >= 10) clearInterval(timer);
+    }, 150);
+    return () => clearInterval(timer);
+  }, [selected, measure]);
+
+  const onPreviewClick = (e: any) => {
+    const target = e.target as HTMLElement;
+    const el = target.closest('[data-node-id]') as HTMLElement | null;
+    if (!el) return;
+    const id = el.dataset.nodeId ?? '';
+    const name = el.dataset.nodeName ?? el.tagName.toLowerCase();
+    const file = el.dataset.nodeFile ?? '';
     const span = decodeNodeId(id);
-
-    // 组件解析：以选中节点自身为准
-    const name = idEl.dataset.nodeName ?? '';
-    const file = idEl.dataset.nodeFile ?? '';
-    const tag = idEl.tagName.toLowerCase();
-
-    const parts: string[] = [];
-    if (name) {
-      // 有 data-node-name：自定义组件（Button、Card…）
-      parts.push(`组件: ${name}  (${file})`);
-    } else {
-      // 无 data-node-name：原生元素（div、span…），直接显示 DOM tag 名
-      parts.push(`元素: <${tag}>`);
-    }
-    if (span) parts.push(`定位: ${span.file}  [${span.startLine}:${span.startCol} ~ ${span.endLine}:${span.endCol}]`);
-    parts.push(`id: ${id}`);
-    setNodeInfo(parts.join('\n\n'));
+    anchorRef.current = el;
+    const list = previewRef.current?.querySelectorAll<HTMLElement>(`[data-node-id="${id}"]`);
+    selIndexRef.current = list ? Array.from(list).indexOf(el) : null;
+    if (selIndexRef.current !== null && selIndexRef.current < 0) selIndexRef.current = null;
+    setSelected({ id, label: name, sub: file || span?.file });
+    refreshTick();
   };
 
-  const callApi = async (path: string) => {
+  const onDropAdd = async (e: React.DragEvent) => {
+    e.preventDefault();
+    const raw = e.dataTransfer.getData('text/plain');
+    if (!raw) return;
+    let comp: { name: string; file: string };
     try {
-      const res = await fetch(`/__editor/${path}`);
-      setApiOut(JSON.stringify(await res.json(), null, 2));
+      comp = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    const under = document.elementFromPoint(e.clientX, e.clientY);
+    const host = under?.closest?.('[data-node-id]') as HTMLElement | null;
+    try {
+      const data = host?.dataset.nodeId
+        ? ((await nodeApi(host.dataset.nodeId).postChild({ nodeName: comp.name, nodeFile: comp.file, props: [] })) as { nodeId: string })
+        : await addChildToPageRoot(pageFile, { nodeName: comp.name, nodeFile: comp.file, props: [] });
+      toast.add({ type: 'success', title: '已插入组件', description: `${comp.name} → ${host ? '目标元素内' : '页面根'}` });
+      anchorRef.current = null;
+      setSelected({ id: data.nodeId, label: comp.name, sub: comp.file });
+      refreshTick();
     } catch (err: any) {
-      setApiOut(String(err));
+      toast.add({ type: 'error', title: '插入失败', description: err.message });
     }
   };
+
+  const onSelectionChange = (id: string | null) => {
+    anchorRef.current = null;
+    if (id) {
+      setSelected((prev) => (prev ? { ...prev, id } : { id, label: '节点' }));
+    } else {
+      selIndexRef.current = null;
+      setSelected(null);
+    }
+    refreshTick();
+  };
+
+  const renderPreview = (page: 'dashboard' | 'users') => (
+    <div
+      ref={previewRef}
+      onClick={onPreviewClick}
+      onDragOver={(e) => e.preventDefault()}
+      onDrop={onDropAdd}
+      className="relative h-full overflow-auto p-6"
+      style={{ scrollBehavior: 'smooth' }}
+    >
+      <PageView page={page} />
+      {box && (
+        <div
+          className="pointer-events-none absolute z-10 rounded-md border-2 border-sky-500 shadow-[0_0_0_3px_rgba(14,165,233,0.25)]"
+          style={{ top: box.top - 3, left: box.left - 3, width: box.width + 6, height: box.height + 6 }}
+        >
+          <div className="absolute -top-6 left-0 flex items-center gap-1 rounded bg-sky-600 px-1.5 py-0.5 text-[10px] text-white">
+            {selected?.label}
+            {selected?.sub && <span className="max-w-52 truncate font-mono opacity-80">{selected.sub}</span>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 
   return (
-    <div className="flex min-h-screen bg-muted/40 text-foreground">
-      {/* 左侧：调试面板 */}
-      <aside className="flex w-80 shrink-0 flex-col gap-3 border-r bg-card p-4">
+    <div className="flex h-screen bg-muted/40 text-foreground">
+      {/* ===== 左侧 ===== */}
+      <aside className="relative flex w-96 shrink-0 flex-col gap-2 border-r bg-card p-3">
         <div>
           <div className="flex items-center justify-between">
-            <h1 className="font-heading text-lg font-semibold tracking-tight">@kesi/vite-plugin</h1>
-            <Badge variant="secondary">shadcn/ui</Badge>
+            <h1 className="font-heading text-base font-semibold tracking-tight">@kesi/vite-plugin</h1>
+            <Badge variant="secondary">组件编辑器</Badge>
           </div>
-          <p className="mt-1 text-xs leading-5 text-muted-foreground">
-            只有 pages/ 下的 JSX 会被编译期转换：每个元素注入 <code>data-node-id</code>，页面里用到的
-            组件（Button/Card…）额外注入 <code>data-node-name / data-node-file</code>（组件定义文件）。
-            点击元素即可查看。
+          <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+            react-router 驱动页面切换；点击右侧页面元素即可在下方编辑属性/插入/删除/查看代码。
           </p>
         </div>
 
-        <Separator />
-
-        <Tabs value={page} onValueChange={(v) => setPage(v as 'dashboard' | 'users')}>
-          <TabsList className="grid w-full grid-cols-2">
-            <TabsTrigger value="dashboard">
-              <LayoutDashboardIcon />
-              总览
-            </TabsTrigger>
-            <TabsTrigger value="users">
-              <UsersIcon />
-              用户
-            </TabsTrigger>
-          </TabsList>
-        </Tabs>
-
-        <Card>
-          <CardHeader className="py-3">
-            <CardTitle className="flex items-center gap-1.5 text-sm">
-              <MousePointerClickIcon className="size-4" />
-              选中节点
-            </CardTitle>
-            <CardDescription className="text-xs">解码后的 data-node-id</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <pre className="max-h-40 overflow-auto text-[11px] leading-4 whitespace-pre-wrap break-all text-muted-foreground">
-              {nodeInfo}
-            </pre>
-          </CardContent>
-        </Card>
-
-        <div>
-          <h2 className="mb-2 text-xs font-medium tracking-wide text-muted-foreground uppercase">
-            /__editor/* API
-          </h2>
-          <div className="flex flex-wrap gap-1.5">
-            {API_ENDPOINTS.map(([path, label]) => (
-              <Button key={path} variant="outline" size="xs" onClick={() => callApi(path)}>
-                {label}
-              </Button>
-            ))}
-          </div>
+        {/* 路由下拉列表 */}
+        <div className="relative">
+          <button
+            onClick={() => setDropOpen((o) => !o)}
+            className="flex h-9 w-full items-center justify-between rounded-lg border bg-background px-3 text-sm hover:bg-muted"
+          >
+            <span className="flex items-center gap-2">
+              {(() => {
+                const Icon = route.icon;
+                return <Icon className="size-4" />;
+              })()}
+              {route.label}
+              <span className="font-mono text-xs text-muted-foreground">{route.path}</span>
+            </span>
+            <span className="text-muted-foreground">{dropOpen ? '▴' : '▾'}</span>
+          </button>
+          {dropOpen && (
+            <div className="absolute z-30 mt-1 w-full overflow-hidden rounded-lg border bg-popover shadow-lg">
+              {APP_ROUTES.map((r) => {
+                const Icon = r.icon;
+                const active = pathname === r.path;
+                return (
+                  <Link
+                    key={r.path}
+                    to={r.path}
+                    onClick={() => setDropOpen(false)}
+                    className={`flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted ${
+                      active ? 'bg-primary/10 font-medium text-primary' : ''
+                    }`}
+                  >
+                    <Icon className="size-4" />
+                    <span>{r.label}</span>
+                    <span className="ml-auto font-mono text-[11px] text-muted-foreground">{r.path}</span>
+                    {active && <Badge className="text-[9px]">当前</Badge>}
+                  </Link>
+                );
+              })}
+            </div>
+          )}
         </div>
 
-        <Card>
-          <CardContent className="py-3">
-            <pre className="max-h-72 overflow-auto text-[10px] leading-4 text-muted-foreground">
-              {apiOut || '点击上方按钮调用接口，响应显示在这里。'}
-            </pre>
-          </CardContent>
-        </Card>
-
-        <p className="mt-auto text-[11px] text-muted-foreground">
-          提示：只有 pages/ 目录下的文件会被转换并注入标记，其它目录的 tsx 不会。组件的
-          name/file 标注需组件把 props 转发到自己的根 DOM 才会显示在真实节点上。
-        </p>
+        {!isApi && <PropPanel page={pageFile} selectedId={selected?.id ?? null} onSelectionChange={onSelectionChange} />}
+        {isApi && (
+          <p className="rounded-md border border-dashed p-2 text-xs text-muted-foreground">
+            当前路由 /api → API 调试台。用上方下拉切到页面路由即可可视化编辑组件。
+          </p>
+        )}
       </aside>
 
-      {/* 右侧：页面预览 */}
-      <main className="min-w-0 flex-1 overflow-auto p-6" onClick={handleClick}>
-        {page === 'dashboard' ? <Dashboard /> : <Users />}
+      {/* ===== 右侧（react-router 路由出口） ===== */}
+      <main className="min-w-0 flex-1">
+        <Routes>
+          <Route path="/dashboard" element={renderPreview('dashboard')} />
+          <Route path="/users" element={renderPreview('users')} />
+          <Route
+            path="/api"
+            element={
+              <div className="h-full p-4">
+                <ApiConsole />
+              </div>
+            }
+          />
+          <Route path="*" element={<Navigate to="/dashboard" replace />} />
+        </Routes>
       </main>
 
       <Toaster />
