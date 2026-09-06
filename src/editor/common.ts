@@ -279,11 +279,11 @@ export function exprAttrValue(expression: AnyNode): AnyNode {
  * 未提供任何值或 item.remove=true → 返回 null（表示删除该属性）。
  */
 export function buildAttrValue(item: AnyNode): AnyNode | null {
-  const explicitExpr = item?.type === 'expr';
+  const explicitExpr = item?.type === 'expression' || item?.type === 'expr';
   if (
     item &&
     (item.remove === true ||
-      (item.value === undefined && item.expr === undefined && item.ast === undefined))
+      (item.value === undefined && item.expr === undefined && item.expression === undefined && item.ast === undefined))
   ) {
     return null;
   }
@@ -300,8 +300,10 @@ export function buildAttrValue(item: AnyNode): AnyNode | null {
       expr = item.ast;
     } else if (item.expr !== undefined) {
       expr = parseExpressionText(String(item.expr));
+    } else if (item.expression !== undefined) {
+      expr = parseExpressionText(String(item.expression));
     } else {
-      throw new EditorError('INVALID_EXPRESSION', '表达式属性（type:expr）的 value 必须是 AST JSON 或非空表达式字符串', 400);
+      throw new EditorError('INVALID_EXPRESSION', '表达式属性（type:expression）的 value 必须是 AST JSON 或非空表达式字符串', 400);
     }
     // 显式表达式：一律包成 {<expr>} 写回（不做字符串字面量特判）
     return exprAttrValue(expr);
@@ -311,6 +313,8 @@ export function buildAttrValue(item: AnyNode): AnyNode | null {
     expr = item.ast;
   } else if (item.expr !== undefined) {
     expr = parseExpressionText(String(item.expr));
+  } else if (item.expression !== undefined) {
+    expr = parseExpressionText(String(item.expression));
   } else {
     const v = item.value;
     // JSON 兼容值：字符串/数字/布尔/null 直接 Literal；对象/数组转 JSON 对象表达式
@@ -356,28 +360,25 @@ export function setAttrValue(el: AnyNode, name: string, valueNode: AnyNode | nul
   return 'add';
 }
 
-/** 属性 -> 便于展示/编辑的值描述 */
+/** 属性 -> 便于展示/编辑的值描述（值类型字段统一为 type；表达式类型为 expression） */
 export function describeAttrValue(attr: AnyNode): AnyNode {
   const name = attr.name?.name ?? '(spread)';
   if (attr.type === 'JSXSpreadAttribute') {
-    return { name, kind: 'spread' };
+    return { name, type: 'spread' };
   }
   const value = attr.value;
-  if (!value) return { name, kind: 'boolean', value: true };
+  if (!value) return { name, type: 'boolean', value: true };
   if (value.type === 'Literal') {
-    return { name, kind: 'literal', value: value.value };
+    return { name, type: 'literal', value: value.value };
   }
   if (value.type === 'JSXExpressionContainer') {
     const e = unwrapExpr(value.expression);
     if (e && e.type === 'Literal') {
-      return { name, kind: 'literal', value: e.value };
+      return { name, type: 'literal', value: e.value };
     }
-    if (e && (e.type === 'ObjectExpression' || e.type === 'ArrayExpression' || e.type === 'ArrowFunctionExpression' || e.type === 'FunctionExpression')) {
-      // 原样文本交由外层按源码切片处理；此处给类型提示
-    }
-    return { name, kind: 'expression' };
+    return { name, type: 'expression' };
   }
-  return { name, kind: 'expression' };
+  return { name, type: 'expression' };
 }
 
 /** import 工具 --------------------------------------------------------- */

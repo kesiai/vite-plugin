@@ -79,17 +79,51 @@ export interface NodeSourceInfo {
   source: string;
   startLine: number;
   startCol: number;
-  props: Array<{ name: string; kind: string; value?: unknown; valueText?: string; ast?: unknown }>;
-  children?: Array<{
-    kind: 'element' | 'text';
-    nodeId?: string;
-    tag?: string;
+  props: Array<{
+    /** 属性名；children 是特殊属性（type='children'） */
+    name: string;
+    /** 值类型：literal | boolean | expression | children | spread */
+    type: string;
+    value?: unknown;
+    valueText?: string;
+    ast?: unknown;
+    childrenValue?: string;
+  }>;
+  /** children 完整源码（顶层快捷字段） */
+  childrenValue?: string;
+  /** 直接子 JSX 元素摘要（供下钻/删除） */
+  elementChildren?: Array<{
+    kind: 'element';
+    nodeId: string;
+    tag: string;
     componentName?: string;
     componentFile?: string;
-    text?: string;
   }>;
-  canEditText?: boolean;
+  /** 组件节点内嵌的 JSON Schema（服务端已附带，无需单独请求） */
+  schema?: SchemaDoc;
 }
+
+/** JSON Schema 中单个属性描述 */
+export interface SchemaPropDoc {
+  type?: string;
+  enum?: unknown[];
+  default?: unknown;
+  description?: string;
+  'x-type'?: string;
+}
+
+/** 组件 props 的 JSON Schema */
+export interface SchemaDoc {
+  $schema?: string;
+  type: 'object';
+  title?: string;
+  properties: Record<string, SchemaPropDoc>;
+  required?: string[];
+  'x-component'?: { name: string; file: string; exportKind: string };
+  'x-order'?: string[];
+}
+
+export type SchemaProp = SchemaPropDoc & { key: string };
 
 // ==================== REST 客户端封装 ====================
 
@@ -105,7 +139,9 @@ export const nodeApi = (nodeId: string) => ({
   schema: () => api(`/__editor/node/${nodeId}/schema`),
   // 修改类统一 POST（兼容只支持 GET/POST 的服务器/代理）
   postProps: (props: unknown[]) => api(`/__editor/node/${nodeId}/props`, { props }, 'POST'),
-  postChildrenText: (text: string) => api(`/__editor/node/${nodeId}/children/text`, { text }, 'POST'),
+  postChildrenSource: (source: string) => api(`/__editor/node/${nodeId}/children/source`, { source }, 'POST'),
+  /** 兼容旧字段：文本即 children 源码 */
+  postChildrenText: (text: string) => api(`/__editor/node/${nodeId}/children/source`, { source: text }, 'POST'),
   postChild: (comp: { nodeName: string; nodeFile: string; props?: unknown[]; childrenText?: string }) =>
     api(`/__editor/node/${nodeId}/children`, comp, 'POST'),
   remove: () => api(`/__editor/node/${nodeId}`, {}, 'DELETE'),

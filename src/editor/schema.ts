@@ -23,14 +23,19 @@ export interface PropSchema {
   description?: string;
 }
 
+/** 每个属性的 JSON Schema 片段（extra keywords：x-type 保留原始语义、x-order 顶层提供） */
+export type JsonPropSpec = Record<string, unknown>;
+
+/** 组件 props 的 JSON Schema（Draft-07 风格；x-component/x-order 为扩展信息） */
 export interface ComponentSchema {
-  version: 1;
-  component: {
-    name: string;
-    file: string;
-    exportKind: 'named' | 'default' | 'member';
-  };
-  properties: PropSchema[];
+  $schema: 'http://json-schema.org/draft-07/schema#';
+  type: 'object';
+  title?: string;
+  description?: string;
+  properties: Record<string, JsonPropSpec>;
+  required?: string[];
+  'x-component': { name: string; file: string; exportKind: 'named' | 'default' | 'member' };
+  'x-order'?: string[];
 }
 
 // ============================ TS 类型 -> schema ============================
@@ -460,15 +465,45 @@ export function componentSchema(fileText: string, fileRel: string, nodeName: str
     }
   }
 
-  const properties = order.map((k) => propsByName.get(k)!);
+  const props = order.map((k) => propsByName.get(k)!);
+
+  const toJsonSpec = (p: PropSchema): JsonPropSpec => {
+    const spec: JsonPropSpec = { 'x-type': p.type };
+    const st = p.type;
+    if (st === 'string' || st === 'number' || st === 'boolean') {
+      spec.type = st;
+    } else if (st === 'array') {
+      spec.type = 'array';
+      if (p.items) spec.items = {};
+    } else if (st === 'object') {
+      spec.type = 'object';
+      if (p.properties) spec.properties = p.properties;
+    } else if (st === 'enum') {
+      spec.enum = (p.options ?? []).map((o) => o.value);
+    } else if (st === 'function') {
+      spec.description = '函数/事件表达式（保存时按 expression 传递）';
+    }
+    if (p.defaultValue !== undefined) spec.default = p.defaultValue;
+    else if (p.defaultRaw !== undefined) spec.default = p.defaultRaw;
+    if (p.description) spec.description = p.description;
+    return spec;
+  };
+
+  const properties: ComponentSchema['properties'] = {};
+  for (const k of order) {
+    const p = propsByName.get(k)!;
+    properties[k] = toJsonSpec(p);
+  }
+  const required = props.filter((p) => p.required).map((p) => p.key);
+
   return {
-    version: 1,
-    component: {
-      name: nodeName,
-      file: fileRel,
-      exportKind: hit.exportKind,
-    },
+    $schema: 'http://json-schema.org/draft-07/schema#',
+    type: 'object',
+    title: `${nodeName} props`,
     properties,
+    ...(required.length > 0 ? { required } : {}),
+    'x-component': { name: nodeName, file: fileRel, exportKind: hit.exportKind },
+    'x-order': order,
   };
 }
 

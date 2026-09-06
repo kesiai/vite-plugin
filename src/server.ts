@@ -11,7 +11,7 @@ import {
   getPageTree,
   getNodeSource,
   setPageProps,
-  setPageChildren,
+  setPageChildrenSource,
   addPageComponent,
   removePageComponent,
   CopyResult,
@@ -234,7 +234,7 @@ export function createApiHandler(
         const rest = decodeURIComponent(pathname.slice(nodePrefix.length));
 
         const parseNodeRest = (restPath: string): { nodeId: string; action: string | null } => {
-          for (const suffix of ['/props', '/children/text', '/children', '/schema']) {
+          for (const suffix of ['/props', '/children/source', '/children/text', '/children', '/schema']) {
             if (restPath.endsWith(suffix)) {
               return { nodeId: restPath.slice(0, -suffix.length), action: suffix.slice(1) };
             }
@@ -244,9 +244,20 @@ export function createApiHandler(
         const { nodeId, action } = parseNodeRest(rest);
         const { rel: file, text } = pageText(inferPageFromNode(nodeId));
 
-        // GET /__editor/node/{id} —— 节点源码 / 属性 / children / AST
+        // GET /__editor/node/{id} —— 节点源码 / 属性 / children / AST；组件附带 JSON Schema
         if (action === null && req.method === 'GET') {
-          await runEditorAction(res, async () => getNodeSource(file, text, nodeId, ctx));
+          await runEditorAction(res, async () => {
+            const info = getNodeSource(file, text, nodeId, ctx);
+            if (info.componentName && info.componentFile) {
+              try {
+                const compText = readProjectFile(ctx, info.componentFile);
+                info.schema = componentSchema(compText, info.componentFile, info.componentName, ctx);
+              } catch {
+                /* 解析不到 schema 时不内嵌 */
+              }
+            }
+            return info;
+          });
           return;
         }
         // GET /__editor/node/{id}/schema —— 该组件节点的属性 schema
@@ -269,12 +280,22 @@ export function createApiHandler(
             return result;
           });
         }
-        // POST /__editor/node/{id}/children/text —— 用文本替换 children
+        // POST /__editor/node/{id}/children/source —— 用 children 源码片段替换（可含元素/表达式/ReactNode）
+        if (action === 'children/source' && req.method === 'POST') {
+          return runEditorAction(res, async () => {
+            const body = (await getJsonBody(req)) ?? {};
+            if (typeof body.source !== 'string') throw new EditorError('INVALID_CHILDREN', 'source 必须是字符串', 400);
+            const result = setPageChildrenSource(file, text, nodeId, { source: body.source }, ctx, history);
+            scanner.scanAll();
+            return result;
+          });
+        }
+        // POST /__editor/node/{id}/children/text —— 兼容旧文本写法（等价于 source）
         if (action === 'children/text' && req.method === 'POST') {
           return runEditorAction(res, async () => {
             const body = (await getJsonBody(req)) ?? {};
             if (typeof body.text !== 'string') throw new EditorError('INVALID_CHILDREN', 'text 必须是字符串', 400);
-            const result = setPageChildren(file, text, nodeId, { text: body.text }, ctx, history);
+            const result = setPageChildrenSource(file, text, nodeId, { source: body.text }, ctx, history);
             scanner.scanAll();
             return result;
           });

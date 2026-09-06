@@ -15,7 +15,7 @@
 - HTTP 状态：200 成功；400 参数/语义；404 资源不存在；405 方法不允许；409 冲突（覆盖/导入冲突/含元素子节点）；422 语法/解析失败；500 内部。
 - 风格：**查询 GET / 新增与修改 POST / 删除 DELETE**；动作型（撤销/粘贴/构建/安装）用 POST。
   **不使用 PUT**：为兼容只放行 GET/POST 的服务器/代理，所有“修改”都以 POST 表达，
-  并通过子路径区分动作（如 `POST /node/{id}/props`、`POST /node/{id}/children/text`、
+  并通过子路径区分动作（如 `POST /node/{id}/props`、`POST /node/{id}/children/source`、
   `POST /pages/{page}/content`）；DELETE 保留，若部署环境同样限制，可改用动作 POST（见文末说明）。
 - `{pagePath}` 为页面相对路径，如 `dashboard/Dashboard`（可含 `/` 与扩展名）；
   `{nodeId}` 为编译期注入的 `data-node-id`（`node-` + base64url，内部已含文件与行列，服务端据此定位到节点所在页面，多数接口可不传 page）。
@@ -70,13 +70,14 @@ GET /__editor/node/{nodeId}
   "source": "<Button size=\"sm\">点我</Button>",
   "startLine": 6, "startCol": 6,
   "props": [
-    { "name": "size", "kind": "literal", "value": "sm", "valueText": "\"sm\"" },
-    { "name": "disabled", "kind": "boolean" },
-    { "name": "onClick", "kind": "expression", "ast": { "type": "ArrowFunctionExpression", "…": "…" } }
+    { "name": "size", "type": "literal", "value": "sm", "valueText": "\"sm\"" },
+    { "name": "disabled", "type": "boolean" },
+    { "name": "onClick", "type": "expression", "ast": { "type": "ArrowFunctionExpression", "…": "…" } },
+    { "name": "children", "type": "children", "childrenValue": "Hello <b>bold</b>{n}" }
   ],
-  "children": [ { "kind": "element", "nodeId": "node-…", "tag": "span", "componentFile": "…" },
-                { "kind": "text", "text": "点我" } ],
-  "canEditText": true,
+  "childrenValue": "Hello <b>bold</b>{n}",
+  "elementChildren": [ { "kind": "element", "nodeId": "node-…", "tag": "span", "componentFile": "…" } ],
+  "schema": { "$schema": "http://json-schema.org/draft-07/schema#", "type": "object", "properties": { … }, "required": [ … ] },
   "ast": { "type": "JSXElement", "…": "…" }
 }
 ```
@@ -92,12 +93,16 @@ GET /__editor/node/{nodeId}/schema
 
 ```json
 { "version": 1,
-  "component": { "name": "Button", "file": "src/components/ui/button.tsx", "exportKind": "named" },
-  "properties": [
-    { "key": "variant", "type": "enum", "required": false,
-      "options": [{ "value": "default", "label": "default" }, { "value": "destructive", "label": "destructive" }],
-      "defaultValue": "default" },
-    { "key": "className", "type": "any" } ] }
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "title": "Button props",
+  "properties": {
+    "variant": { "x-type": "enum", "enum": ["default", "destructive", "secondary", "outline", "ghost", "link"], "default": "default" },
+    "size": { "x-type": "enum", "enum": ["default", "xs", "sm", "lg", "icon", "icon-xs", "icon-sm", "icon-lg"] },
+    "className": { "x-type": "any" }
+  },
+  "x-component": { "name": "Button", "file": "src/components/ui/button.tsx", "exportKind": "named" },
+  "x-order": ["variant", "size", "className"] }
 ```
 
 ### 修改属性（批量）
@@ -105,31 +110,40 @@ GET /__editor/node/{nodeId}/schema
 ```
 POST /__editor/node/{nodeId}/props
 Body: { "props": [ { "name": "size", "value": "lg" },
-                   { "name": "onClick", "type": "expr", "value": "() => save()" },   // 表达式字符串
-                   { "name": "style", "type": "expr", "value": { "type": "ObjectExpression", "…": "…" } }, // AST JSON
+                   { "name": "onClick", "type": "expression", "value": "() => save()" },   // 表达式字符串
+                   { "name": "style", "type": "expression", "value": { "type": "ObjectExpression", "…": "…" } }, // AST JSON
                    { "name": "disabled", "remove": true } ] }
 ```
 
-**表达式属性**：属性项带 `"type": "expr"` 时 value 支持两种：
-- **表达式字符串**（如 `() => save()`、`count > 0 ? 'a' : 'b'`）：服务端先用 yuku 解析成 AST，
-  再包进 `{<expr>}` 作为 JSX 属性表达式写回（先解析校验，非法返回 `INVALID_EXPRESSION` 且不落盘）；
-- **AST JSON**（ESTree 表达式节点对象，如 ObjectExpression/ArrowFunctionExpression）：直接克隆并包成表达式写回。
+- 读取端 props 项用 `type` 表示值类型：`literal` / `boolean` / `expression` / `children` / `spread`。
+- **表达式属性**：保存时属性项带 `"type": "expression"`（兼容旧值 `expr`），value 支持两种：
+  - **表达式字符串**（如 `() => save()`、`count > 0 ? 'a' : 'b'`）：先用 yuku 解析成 AST，
+    再包进 `{<expr>}` 作为 JSX 属性表达式写回（先解析校验，非法返回 `INVALID_EXPRESSION` 且不落盘）；
+  - **AST JSON**（ESTree 表达式节点对象）：直接克隆并包成表达式写回；
+  - 也可用 `expression` / `expr` 字段直接传表达式字符串（不带 type 的旧写法）。
+- 不带 `type` 时：`value` 原始值 / `expression`·`expr` 表达式文本 / `ast` AST JSON。
+- `remove: true`（或三者皆无）删除该属性。
+- 写盘后返回 `{ updatedSource, nodeId, applied }`，可撤销。
+- 组件节点（`GET /node/{id}`）响应已**内嵌 `schema`（JSON Schema Draft-07）**：properties 为对象映射、
+  required、单属性 default/enum/type/description，扩展关键字 `x-component`（组件元信息）与 `x-order`（顺序）。
+  不再需要为属性编辑单独请求 schema（`GET /node/{id}/schema` 与 `GET /component-schemas?nodeName=&nodeFile=`
+  返回同一 JSON Schema）。
 
-不带 `type` 时沿用旧约定：`value` 原始值（string/number/boolean/JSON）、`expr` 表达式文本、
-`ast` AST JSON。`remove: true`（或三者皆无）删除该属性。
-写盘后返回 `{ updatedSource, nodeId, applied }`，可撤销。
-
-### 编辑 children（纯文本）
+### 编辑 children（源码级）
 
 ```
-POST /__editor/node/{nodeId}/children/text
-Body: { "text": "新文本" }   // 空字符串 = 清空 children（标签自动转自闭合）
+POST /__editor/node/{nodeId}/children/source
+Body: { "source": "Hello <b>bold</b>{count > 0 ? 'x' : 'y'}" }   // 空字符串 = 清空 children
 ```
 
-> `POST /node/{id}/children` 是“插入子组件”，`POST /node/{id}/children/text` 才是替换文本，两者以子路径区分。
-
-仅当该节点没有 JSX 元素/表达式子节点（`GET /node/{id}` 的 `canEditText: true`）时允许；
-否则返回 `CHILDREN_HAS_ELEMENTS`(409)。写盘后返回 `{ updatedSource, nodeId }`，可撤销。
+- children 是**特殊属性**：`GET /node/{id}` 的 props 中有一项 `{ name:'children', type:'children', childrenValue }`，
+  顶层 `childrenValue` 与该项一致，直接返回 children 在源码中的**原样文本**
+  （含文本 / JSX 表达式 / ReactNode / JSX 注释，不做过滤）；`elementChildren` 仅列出直接子 JSX 元素
+  （带 node-id，供下钻/删除）。
+- 保存时把编辑后的 children 源码片段整体写回（可含任意 JSX children），先解析校验，
+  非法返回 `PARSE_ERROR`；不再需要 canEditText 之类的限制。
+- 兼容旧写法：`POST /node/{id}/children/text`，body `{ text }` 等价于 source。
+- 写盘后返回 `{ updatedSource, nodeId, childrenValue }`，可撤销。
 
 ### 插入子组件
 
@@ -185,6 +199,27 @@ GET /__editor/component-schemas?nodeName=Button&nodeFile=src%2Fcomponents%2Fui%2
 | POST | `/__editor/install-client` | – | 安装 `@kesi/client`（SSE） |
 | POST | `/__editor/init-config` | `{ projectId }` | 生成 `kesi.config.ts` |
 | POST | `/__editor/build` | – | 执行 `npm run build`（SSE） |
+
+## import 自动补齐与写前校验
+
+参考 `ensure-kesi-imports`（表达式 hook 落串后自动合并 import）的做法，编辑器内所有**会改动代码的写操作**
+（`POST /node/{id}/props`、`POST /node/{id}/children/source`、`POST /node/{id}/children`、
+`POST /pages/{page}/children`、`POST /clipboard/apply`）在写盘前统一执行：
+
+1. 只扫描**本次修改影响范围**内实际出现的自定义标识符（AST 级，天然排除字符串/注释/TS 类型/成员属性名）；
+2. 页面内已 import、本文件已声明（含组件内参数/局部变量）的标识符跳过，避免误报；
+2. **@kesi/client 成员（移植自 ensure-kesi-imports）**：`Page/Subscribe` 与全部 hooks
+   （useUser/useEvents/useTag/useTableData/useModel*/usePageVar*/…）及 `getSettings` 为可自动导入面。
+   代码中出现而页面未导入/未本地声明的成员：
+   - 已有 `import { … } from '@kesi/client'` → 合并进该语句（保留原有成员，幂等）；
+   - 无该 import → 在 import 区新增一条；
+   - 页面已本地声明同名（如自定义 `usePageVar`）→ 不重复导入（避免重名冲突）。
+3. 其它缺失的自定义标识符/组件从项目组件目录自动解析（`src/components`、`components`，按命名惯例
+   探测 + 导出扫描，带缓存），支持 named/default：
+   - 能解析 → 自动合并/新增 import（幂等；同源不重复、异源同名抛 `IMPORT_CONFLICT`）；
+   - 无法解析 → 返回 `MISSING_IMPORT`（409，message 中列出缺失标识符），**本次修改不写盘**。
+
+新增 import 会让文件行号前移，因此这类写入统一用“哨兵属性 + 重生成”精确定位返回新的 node-id。
 
 ## 撤销/重做与写操作注意事项
 

@@ -10,6 +10,7 @@ import { Separator } from '@/components/ui/separator';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { toast } from '@/components/ui/toast';
 import Clock from '../../components/Clock';
+import { useTag, useDatasourceValue, useSystemVar, useTableData } from '@kesi/client';
 type DeviceStatus = 'online' | 'offline' | 'warning';
 interface Device {
   id: number;
@@ -53,11 +54,11 @@ export default function Dashboard() {
         <div>
           <h1 className="font-heading text-2xl font-semibold tracking-tight">设备总览</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            pages/dashboard/Dashboard.tsx · 点击任意元素可查看 data-node-id
+            pages/dashboard/Dashboard.tsx · 点击任意元素可查看 data-node-id {useTag({ tableId: 'tt1', dataId: '222', tagId: 'pressure', field: 'value' })}
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Clock label="服务器时间" />
+          <Clock label="服务器时间2" />
           <Separator orientation="vertical" className="h-6" />
           <Button variant="outline" size="sm" onClick={fakeRefresh}>
             <RefreshCwIcon />
@@ -73,7 +74,7 @@ export default function Dashboard() {
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList>
           <TabsTrigger value="overview">概览</TabsTrigger>
-          <TabsTrigger value="devices">设备列表</TabsTrigger>
+          <TabsTrigger value="devices" variant="default">设备列表</TabsTrigger>
         </TabsList>
 
         {}
@@ -90,18 +91,18 @@ export default function Dashboard() {
                   <div className="text-2xl tracking-tight border border-solid border-slate-500 shadow-lg rounded-md p-2 font-extrabold text-center text-blue-500 bg-amber-500">{s.value}</div>
                 </CardContent>
                 <CardFooter>
-                  <Badge variant={s.up ? 'secondary' : 'destructive'} className={s.up ? 'bg-emerald-100 text-emerald-700' : ''}>
+                  <Badge variant={s.up ? 'ghost' : 'destructive'} className={s.up ? 'bg-emerald-100 text-emerald-700' : ''}>
                     {s.trend}
                   </Badge>
-                  <span className="ml-2 text-xs text-muted-foreground">较昨日</span>
+                  <span className="ml-2 text-xs text-muted-foreground">较昨日 {s.trend}</span>
                 </CardFooter>
               </Card>))}
           </section>
 
           <Card>
             <CardHeader>
-              <CardTitle>近 7 日运行趋势</CardTitle>
-              <CardDescription>折线数据来自页面静态示例，仅用于演示</CardDescription>
+              <CardTitle>近 7 日运行趋势 {useTag({ tableId: 'tt1', dataId: 'YL001', tagId: 'pressure', field: 'value' })}</CardTitle>
+              <CardDescription>折线数据来自页面静态示例，仅用于演示{useTag({ tableId: 'tt1', dataId: 'YL001', tagId: 'temperature', field: 'value' })}</CardDescription>
             </CardHeader>
             <CardContent>
               <div className="flex h-40 items-end gap-3">

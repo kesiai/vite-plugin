@@ -27,16 +27,22 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
 import { toast } from '@/components/ui/toast';
-import { api, loadCatalog, NodeSourceInfo, SchemaProp, CatComp, pageApi, nodeApi, clipboardApi, addChildToPageRoot, componentSchemaOf } from './editorApi';
+import {
+  loadCatalog,
+  NodeSourceInfo,
+  SchemaDoc,
+  SchemaPropDoc,
+  CatComp,
+  pageApi,
+  nodeApi,
+  clipboardApi,
+  addChildToPageRoot,
+} from './editorApi';
 
-function coerceValue(key: string, raw: string, schema: SchemaProp[] | null): unknown {
-  if (raw === '') return '';
-  const sp = schema?.find((x) => x.key === key);
-  if (raw === 'true') return true;
-  if (raw === 'false') return false;
-  if (sp?.type === 'boolean') return raw === 'true';
-  if (sp?.type === 'number' && /^-?\d+(\.\d+)?$/.test(raw)) return Number(raw);
-  return raw;
+type ValueMode = 'literal' | 'expr';
+
+function stripBraces(t?: string) {
+  return (t ?? '').replace(/^\{\s*/, '').replace(/\s*}$/, '');
 }
 
 const EVENT_TEMPLATES: Array<[string, string]> = [
@@ -44,6 +50,24 @@ const EVENT_TEMPLATES: Array<[string, string]> = [
   ['onChange', "(e) => console.log(e.target.value)"],
   ['onSubmit', "(e) => { e.preventDefault(); }"],
 ];
+
+/** 把 JSON Schema 的属性对象变成有序行 */
+function schemaList(doc: SchemaDoc | null) {
+  if (!doc || !doc.properties) return [] as Array<{ key: string; spec: SchemaPropDoc; required: boolean }>;
+  const order = doc['x-order'] ?? Object.keys(doc.properties);
+  const required = doc.required ?? [];
+  return order.map((key) => ({ key, spec: doc.properties[key] ?? {}, required: required.includes(key) }));
+}
+
+function coerceValue(key: string, raw: string, rows: Array<{ key: string; spec: SchemaPropDoc }>): unknown {
+  if (raw === '') return '';
+  const spec = rows.find((r) => r.key === key)?.spec;
+  if (raw === 'true') return true;
+  if (raw === 'false') return false;
+  if (spec?.type === 'boolean') return raw === 'true';
+  if (spec?.type === 'number' && /^-?\d+(\.\d+)?$/.test(raw)) return Number(raw);
+  return raw;
+}
 
 export default function PropPanel({
   page,
@@ -55,9 +79,10 @@ export default function PropPanel({
   onSelectionChange: (id: string | null) => void;
 }) {
   const [node, setNode] = useState<NodeSourceInfo | null>(null);
-  const [schema, setSchema] = useState<SchemaProp[] | null>(null);
+  const [schema, setSchema] = useState<SchemaDoc | null>(null);
   const [form, setForm] = useState<Record<string, string>>({});
   const [formKeys, setFormKeys] = useState<string[]>([]);
+  const [valueModes, setValueModes] = useState<Record<string, ValueMode>>({});
   const [busy, setBusy] = useState(false);
   const [undoable, setUndoable] = useState({ canUndo: false, canRedo: false });
   const [showSource, setShowSource] = useState(false);
@@ -66,12 +91,10 @@ export default function PropPanel({
   const [addName, setAddName] = useState('');
   const [newKey, setNewKey] = useState('');
   const [newVal, setNewVal] = useState('');
-  const [newMode, setNewMode] = useState<'literal' | 'expr'>('literal');
-  /** 每个属性键的值模式：literal（原值）或 expr（表达式） */
-  const [valueModes, setValueModes] = useState<Record<string, 'literal' | 'expr'>>({});
+  const [newMode, setNewMode] = useState<ValueMode>('literal');
   const [hasClipboard, setHasClipboard] = useState(false);
-  const [childrenText, setChildrenText] = useState('');
-  const [canEditText, setCanEditText] = useState(false);
+  const [childrenSource, setChildrenSource] = useState('');
+  const [elementChildren, setElementChildren] = useState<NodeSourceInfo['elementChildren']>([]);
 
   const notify = (m: string, t: 'success' | 'error' | 'info' = 'success') =>
     toast.add({ type: t, title: t === 'error' ? '操作失败' : t === 'info' ? '提示' : '成功', description: m });
@@ -84,7 +107,6 @@ export default function PropPanel({
     }
   }, [page]);
 
-  // 每次选中变化重新拉取节点信息 + schema
   useEffect(() => {
     if (!selectedId) {
       setNode(null);
@@ -92,8 +114,8 @@ export default function PropPanel({
       setForm({});
       setFormKeys([]);
       setValueModes({});
-      setChildrenText('');
-      setCanEditText(false);
+      setChildrenSource('');
+      setElementChildren([]);
       return;
     }
     let cancelled = false;
@@ -103,26 +125,21 @@ export default function PropPanel({
         const info = (await nodeApi(selectedId).get()) as NodeSourceInfo;
         if (cancelled) return;
         setNode(info);
-        setCanEditText(!!info.canEditText);
-        if (info.canEditText) {
-          const raw = (info.children ?? [])
-            .filter((c) => c.kind === 'text')
-            .map((c) => c.text ?? '')
-            .join('');
-          setChildrenText(raw);
-        }
+        setSchema(info.schema ?? null);
+        setChildrenSource(info.childrenValue ?? '');
+        setElementChildren(info.elementChildren ?? []);
+
         const init: Record<string, string> = {};
-        const modes: Record<string, 'literal' | 'expr'> = {};
-        const stripBraces = (t?: string) =>
-          (t ?? '').replace(/^\{\s*/, '').replace(/\s*\}$/, '');
+        const modes: Record<string, ValueMode> = {};
         for (const p of info.props) {
-          if (p.kind === 'literal' && p.value !== undefined) {
+          if (p.name === 'children') continue; // children 走源码编辑
+          if (p.type === 'literal' && p.value !== undefined) {
             init[p.name] = String(p.value);
             modes[p.name] = 'literal';
-          } else if (p.kind === 'boolean') {
+          } else if (p.type === 'boolean') {
             init[p.name] = 'true';
             modes[p.name] = 'literal';
-          } else if (p.kind === 'expression') {
+          } else if (p.type === 'expression') {
             init[p.name] = stripBraces(p.valueText);
             modes[p.name] = 'expr';
           }
@@ -130,25 +147,7 @@ export default function PropPanel({
         setForm(init);
         setFormKeys(Object.keys(init));
         setValueModes(modes);
-        setSchema(null);
-        if (info.componentName && info.componentFile) {
-          try {
-            const sc = await componentSchemaOf(info.componentFile, info.componentName);
-            if (cancelled) return;
-            setSchema(sc.properties);
-            setForm((prev) => {
-              const next = { ...prev };
-              for (const p of sc.properties) {
-                if (p.defaultValue !== undefined && next[p.key] === undefined && p.type !== 'boolean') {
-                  next[p.key] = String(p.defaultValue);
-                }
-              }
-              return next;
-            });
-          } catch {
-            /* 无 schema 时自由编辑 */
-          }
-        }
+
         try {
           const clip = await clipboardApi.check();
           setHasClipboard(!!clip.has);
@@ -182,13 +181,14 @@ export default function PropPanel({
 
   const save = async () => {
     if (!node) return;
+    const rows = schemaList(schema);
     const changes: any[] = [];
     for (const key of Object.keys(form)) {
       if (valueModes[key] === 'expr') {
         if (form[key] === '') changes.push({ name: key, remove: true });
-        else changes.push({ name: key, type: 'expr', value: form[key] });
+        else changes.push({ name: key, type: 'expression', value: form[key] });
       } else {
-        changes.push({ name: key, value: coerceValue(key, form[key], schema) });
+        changes.push({ name: key, value: coerceValue(key, form[key], rows) });
       }
     }
     for (const key of formKeys) {
@@ -205,12 +205,12 @@ export default function PropPanel({
     }
   };
 
-  const saveChildrenText = async () => {
+  const saveChildrenSource = async () => {
     if (!node) return;
     setBusy(true);
     try {
-      const data = (await nodeApi(node.nodeId).postChildrenText(childrenText)) as { nodeId: string };
-      notify(childrenText ? 'children 文本已更新' : 'children 已清空');
+      const data = (await nodeApi(node.nodeId).postChildrenSource(childrenSource)) as { nodeId: string };
+      notify(childrenSource.trim() ? 'children 已更新' : 'children 已清空');
       onSelectionChange(data.nodeId ?? null);
     } catch (e: any) {
       notify(e.message, 'error');
@@ -234,15 +234,6 @@ export default function PropPanel({
     }
   };
 
-  const removeProp = (key: string) => {
-    setForm((prev) => {
-      const n = { ...prev };
-      delete n[key];
-      return n;
-    });
-    setFormKeys((prev) => (prev.includes(key) ? prev : [...prev, key]));
-  };
-
   const doDelete = async () => {
     if (!node) return;
     setBusy(true);
@@ -260,7 +251,8 @@ export default function PropPanel({
   const doUndoRedo = async (mode: 'undo' | 'redo') => {
     setBusy(true);
     try {
-      const data = mode === 'undo' ? await pageApi(page).undo() : await pageApi(page).redo();
+      if (mode === 'undo') await pageApi(page).undo();
+      else await pageApi(page).redo();
       notify(mode === 'undo' ? '已撤销' : '已重做');
       onSelectionChange(null);
     } catch (e: any) {
@@ -322,7 +314,17 @@ export default function PropPanel({
     setNewMode('literal');
   };
 
-  const keyList = Array.from(new Set([...(schema?.map((p) => p.key) ?? []), ...Object.keys(form)]));
+  const removeProp = (key: string) => {
+    setForm((prev) => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+    setFormKeys((prev) => (prev.includes(key) ? prev : [...prev, key]));
+  };
+
+  const rows = schemaList(schema);
+  const keyList = Array.from(new Set([...rows.map((r) => r.key), ...Object.keys(form)]));
 
   return (
     <Card className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -334,7 +336,7 @@ export default function PropPanel({
         <CardDescription className="text-[11px]">
           {node
             ? node.componentFile
-              ? `${node.componentFile} · 组件属性`
+              ? `${node.componentFile} · 组件属性（node 已内嵌 JSON Schema）`
               : `原生元素 <${node.tag}>（页面内）`
             : '点击右侧页面元素进行编辑'}
         </CardDescription>
@@ -342,129 +344,61 @@ export default function PropPanel({
       <CardContent className="min-h-0 flex-1 space-y-2 overflow-auto pb-4">
         {!node ? (
           <p className="p-2 text-xs text-muted-foreground">
-            未选中节点。点击右侧预览页中的任意组件/元素即可在此编辑属性、插入/删除组件或查看代码。
+            未选中节点。点击右侧预览页中的任意组件/元素即可编辑属性、children、插入/删除或查看代码。
           </p>
         ) : (
           <>
-            {/* 操作条 */}
             <div className="flex flex-wrap items-center gap-1">
-              <Button size="xs" variant="outline" onClick={doUndoRedo.bind(null, 'undo')} disabled={!undoable.canUndo} title="撤销">
+              <Button size="xs" variant="outline" onClick={() => doUndoRedo('undo')} disabled={!undoable.canUndo}>
                 <Undo2Icon />
                 撤销
               </Button>
-              <Button size="xs" variant="outline" onClick={doUndoRedo.bind(null, 'redo')} disabled={!undoable.canRedo} title="重做">
+              <Button size="xs" variant="outline" onClick={() => doUndoRedo('redo')} disabled={!undoable.canRedo}>
                 <Redo2Icon />
                 重做
               </Button>
-              <Button size="xs" variant="outline" onClick={doCopy} title="复制该组件">
+              <Button size="xs" variant="outline" onClick={doCopy}>
                 <CopyIcon />
                 复制
               </Button>
-              <Button size="xs" variant="outline" onClick={doPaste} disabled={!hasClipboard && !catalog.length} title="粘贴到选中节点（或页面根）">
+              <Button size="xs" variant="outline" onClick={doPaste} disabled={!hasClipboard}>
                 <ClipboardPasteIcon />
                 粘贴
               </Button>
-              <Button size="xs" variant="outline" onClick={() => setShowSource(true)} title="查看该节点源码">
+              <Button size="xs" variant="outline" onClick={() => setShowSource(true)}>
                 <Code2Icon />
                 代码
               </Button>
-              <Button size="xs" variant="destructive" onClick={() => setConfirmDel(true)} title="删除该节点">
+              <Button size="xs" variant="destructive" onClick={() => setConfirmDel(true)}>
                 <Trash2Icon />
               </Button>
             </div>
 
             <Separator />
 
-            <Separator />
-
-            {/* children 编辑 */}
-            <div className="flex flex-col gap-1.5">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-medium">Children 内容</span>
-                {node && !canEditText && (
-                  <span className="text-[10px] text-muted-foreground">含 JSX 元素子节点：点击可下钻或移除</span>
-                )}
-              </div>
-              {canEditText ? (
-                <>
-                  <textarea
-                    className="h-16 w-full resize-y rounded-md border bg-background p-2 text-xs"
-                    value={childrenText}
-                    onChange={(e) => setChildrenText(e.target.value)}
-                    placeholder="输入该组件的文本内容（空则移除 children）…"
-                  />
-                  <Button size="sm" variant="outline" className="self-start" onClick={saveChildrenText} disabled={busy}>
-                    保存文本
-                  </Button>
-                </>
-              ) : (
-                (node?.children ?? []).length > 0 && (
-                  <div className="flex flex-col gap-1">
-                    {(node.children ?? [])
-                      .filter((c) => c.kind === 'element')
-                      .map((c, i) => (
-                        <div key={i} className="flex items-center gap-1.5 rounded border bg-muted/40 px-2 py-1">
-                          <span className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden text-xs">
-                            <span className="text-muted-foreground">{'<'}</span>
-                            <span className="truncate">{c.componentName || c.tag}</span>
-                            <span className="text-muted-foreground">{'>'}</span>
-                            {c.componentFile && (
-                              <span className="max-w-40 truncate font-mono text-[9px] text-muted-foreground">
-                                {c.componentFile}
-                              </span>
-                            )}
-                          </span>
-                          {c.nodeId && (
-                            <>
-                              <button
-                                className="rounded px-1.5 py-0.5 text-[11px] text-primary hover:bg-primary/10"
-                                onClick={() => drillInto(c.nodeId!)}
-                                title="下钻编辑该子节点"
-                              >
-                                编辑
-                              </button>
-                              <button
-                                className="rounded px-1.5 py-0.5 text-[11px] text-destructive hover:bg-destructive/10"
-                                onClick={() => removeChild(c.nodeId!)}
-                                title="移除该子节点"
-                              >
-                                删除
-                              </button>
-                            </>
-                          )}
-                        </div>
-                      ))}
-                  </div>
-                )
-              )}
-            </div>
-
-            {/* 属性表单 */}
+            {/* 属性列表（含表达式支持） */}
             <div className="flex flex-col gap-1.5">
               {keyList.map((key) => {
-                const sp = schema?.find((x) => x.key === key);
-                const removed = !(key in form);
-                const mode = valueModes[key] ?? 'literal';
-                const setMode = (m: 'literal' | 'expr') =>
-                  setValueModes((prev) => ({ ...prev, [key]: m }));
-                const isEnum = !!sp?.options?.length;
+                const row = rows.find((r) => r.key === key);
+                const sp = row?.spec;
+                const isEnum = !!sp?.enum?.length;
                 const isBool = sp?.type === 'boolean' || form[key] === 'true' || form[key] === 'false';
+                const mode = valueModes[key] ?? 'literal';
+                const removed = !(key in form);
                 return (
                   <div key={key} className="flex items-center gap-2">
                     <div className="w-28 shrink-0">
                       <div className="flex items-center gap-1 text-xs font-medium">
                         {key}
-                        {sp?.required ? <span className="text-destructive">*</span> : null}
+                        {row?.required ? <span className="text-destructive">*</span> : null}
                         {mode === 'expr' && !isEnum && !isBool ? (
                           <span className="rounded bg-violet-100 px-1 text-[9px] font-semibold text-violet-700">expr</span>
                         ) : null}
                       </div>
-                      {sp && (
-                        <div className="text-[9px] text-muted-foreground">
-                          {isEnum ? 'enum' : sp.type}
-                          {sp.defaultValue !== undefined ? ` =${String(sp.defaultValue)}` : ''}
-                        </div>
-                      )}
+                      <div className="text-[9px] text-muted-foreground">
+                        {isEnum ? 'enum' : sp?.type ?? (mode === 'expr' ? 'expression' : 'any')}
+                        {sp?.default !== undefined ? ` =${String(sp.default)}` : ''}
+                      </div>
                     </div>
                     <div className="flex min-w-0 flex-1 items-center gap-1">
                       {!removed && (isEnum || isBool) ? (
@@ -474,9 +408,9 @@ export default function PropPanel({
                             value={form[key]}
                             onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
                           >
-                            {sp!.options!.map((o) => (
-                              <option key={String(o.value)} value={String(o.value)}>
-                                {o.label}
+                            {sp!.enum!.map((v) => (
+                              <option key={String(v)} value={String(v)}>
+                                {String(v)}
                               </option>
                             ))}
                           </select>
@@ -495,8 +429,8 @@ export default function PropPanel({
                           <select
                             className="h-7 w-14 shrink-0 rounded-md border bg-background px-1 text-[10px]"
                             value={mode}
-                            onChange={(e) => setMode(e.target.value as 'literal' | 'expr')}
-                            title="值模式：值（普通输入）或表达式（字符串/AST 转表达式写回）"
+                            onChange={(e) => setValueModes((prev) => ({ ...prev, [key]: e.target.value as ValueMode }))}
+                            title="值模式：值 或 表达式（expression）"
                           >
                             <option value="literal">值</option>
                             <option value="expr">expr</option>
@@ -525,29 +459,29 @@ export default function PropPanel({
                   </div>
                 );
               })}
-              {keyList.length === 0 && <p className="text-xs text-muted-foreground">没有可编辑属性，用下方“新增属性”添加。</p>}
+              {keyList.length === 0 && <p className="text-xs text-muted-foreground">没有可编辑属性，可用下方“新增属性”添加。</p>}
             </div>
 
-            {/* 新增属性 + 事件模板 */}
+            {/* 新增属性 */}
             <div className="flex items-end gap-1.5">
               <div className="flex min-w-0 flex-1 flex-col">
                 <Label className="text-[10px]">属性名</Label>
                 <Input className="h-7 text-xs" placeholder="variant / onClick / className" value={newKey} onChange={(e) => setNewKey(e.target.value)} />
               </div>
-              <div className="w-20 shrink-0 flex-col">
+              <div className="w-20 shrink-0">
                 <Label className="text-[10px]">类型</Label>
                 <select
                   className="h-7 w-full rounded-md border bg-background px-1 text-[10px]"
                   value={newMode}
-                  onChange={(e) => setNewMode(e.target.value as 'literal' | 'expr')}
+                  onChange={(e) => setNewMode(e.target.value as ValueMode)}
                 >
                   <option value="literal">值</option>
                   <option value="expr">expr</option>
                 </select>
               </div>
               <div className="flex min-w-0 flex-1 flex-col">
-                <Label className="text-[10px]">属性值</Label>
-                <Input className="h-7 text-xs" placeholder="值（字符串/true/false/数字）" value={newVal} onChange={(e) => setNewVal(e.target.value)} />
+                <Label className="text-[10px]">属性值 / 表达式</Label>
+                <Input className="h-7 text-xs" placeholder="值或 () => …" value={newVal} onChange={(e) => setNewVal(e.target.value)} />
               </div>
               <Button size="sm" variant="outline" onClick={addProp}>
                 <PlusIcon />
@@ -562,10 +496,9 @@ export default function PropPanel({
                     size="xs"
                     variant="ghost"
                     onClick={() => {
-                    setValueModes((prev) => ({ ...prev, [k]: 'expr' }));
-                    setForm((f) => ({ ...f, [k]: v }));
-                  }}
-                    title={`填入模板：${v}`}
+                      setValueModes((prev) => ({ ...prev, [k]: 'expr' }));
+                      setForm((f) => ({ ...f, [k]: v }));
+                    }}
                   >
                     {k} 模板
                   </Button>
@@ -575,18 +508,55 @@ export default function PropPanel({
 
             <Separator />
 
-            {/* 插入组件（拖拽或选择） */}
+            {/* children（特殊属性：源码级编辑） */}
+            <div className="flex flex-col gap-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-medium">children（源码）</span>
+                {(elementChildren?.length ?? 0) > 0 && (
+                  <span className="text-[10px] text-muted-foreground">含 {elementChildren!.length} 个子元素，可下钻/删除</span>
+                )}
+              </div>
+              <textarea
+                className="h-20 w-full resize-y rounded-md border bg-background p-2 font-mono text-xs"
+                value={childrenSource}
+                onChange={(e) => setChildrenSource(e.target.value)}
+                placeholder={'可包含文本 / JSX 表达式 / ReactNode 片段，如 <b>bold</b>{count} 或留空清空'}
+              />
+              <Button size="sm" variant="outline" className="self-start" onClick={saveChildrenSource} disabled={busy}>
+                保存 children
+              </Button>
+              {elementChildren && elementChildren.length > 0 && (
+                <div className="flex flex-col gap-1">
+                  {elementChildren.map((c, i) => (
+                    <div key={i} className="flex items-center gap-1.5 rounded border bg-muted/40 px-2 py-1">
+                      <span className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden text-xs">
+                        <span className="text-muted-foreground">{'<'}</span>
+                        <span className="truncate">{c.componentName || c.tag}</span>
+                        <span className="text-muted-foreground">{'>'}</span>
+                        {c.componentFile && (
+                          <span className="max-w-40 truncate font-mono text-[9px] text-muted-foreground">{c.componentFile}</span>
+                        )}
+                      </span>
+                      <button className="rounded px-1.5 py-0.5 text-[11px] text-primary hover:bg-primary/10" onClick={() => drillInto(c.nodeId)}>
+                        编辑
+                      </button>
+                      <button className="rounded px-1.5 py-0.5 text-[11px] text-destructive hover:bg-destructive/10" onClick={() => removeChild(c.nodeId)}>
+                        删除
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <Separator />
+
+            {/* 组件库插入 */}
             <div className="flex gap-1.5">
-              <Button
-                size="sm"
-                className="flex-1"
-                onClick={async () => {
-                  await ensureCatalog();
-                }}
-              >
+              <Button size="sm" variant="outline" className="flex-1" onClick={ensureCatalog}>
                 插入组件…
               </Button>
-              <Button size="sm" variant="default" disabled={busy} onClick={save}>
+              <Button size="sm" disabled={busy} onClick={save}>
                 保存属性
               </Button>
             </div>
@@ -598,15 +568,8 @@ export default function PropPanel({
                     draggable
                     onDragStart={(e) => e.dataTransfer.setData('text/plain', JSON.stringify({ name: c.name, file: c.file }))}
                     className="cursor-grab rounded border bg-muted/50 px-1.5 py-0.5 text-[11px] hover:bg-muted"
-                    title={`拖到右侧页面元素上插入；或点选添加：${c.file}`}
                   >
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAddName(c.name);
-                        doAdd(c.name, c.file);
-                      }}
-                    >
+                    <button type="button" onClick={() => doAdd(c.name, c.file)}>
                       {c.name}
                     </button>
                     <span className="ml-1 text-[9px] text-muted-foreground">{c.file.replace(/^src\/components\//, '')}</span>
@@ -618,7 +581,6 @@ export default function PropPanel({
         )}
       </CardContent>
 
-      {/* 查看代码 */}
       <Dialog open={showSource} onOpenChange={setShowSource}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
@@ -631,7 +593,6 @@ export default function PropPanel({
         </DialogContent>
       </Dialog>
 
-      {/* 删除确认 */}
       <AlertDialog open={confirmDel} onOpenChange={setConfirmDel}>
         <AlertDialogContent>
           <AlertDialogHeader>
