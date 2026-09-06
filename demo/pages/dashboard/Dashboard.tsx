@@ -87,7 +87,7 @@ export default function Dashboard() {
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="pb-2">
-                  <div className="text-2xl font-semibold tracking-tight">{s.value}</div>
+                  <div className="text-2xl tracking-tight border border-solid border-slate-500 shadow-lg rounded-md p-2 font-extrabold text-center text-blue-500 bg-amber-500">{s.value}</div>
                 </CardContent>
                 <CardFooter>
                   <Badge variant={s.up ? 'secondary' : 'destructive'} className={s.up ? 'bg-emerald-100 text-emerald-700' : ''}>
@@ -151,7 +151,7 @@ export default function Dashboard() {
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>添加设备<Clock /></DialogTitle>
+            <DialogTitle>添加设备</DialogTitle>
             <DialogDescription>填写设备基本信息，保存后即出现在设备列表中。</DialogDescription>
           </DialogHeader>
           <div className="flex flex-col gap-4">

@@ -113,6 +113,11 @@ remove-component 全部通过（见运行记录末尾）。
 说明：页面组件内部状态（如打开中的弹窗）在热替换时会被重置；若需组件级保真，可后续为
 demo 接入与 vite5 兼容的 @vitejs/plugin-react（fast refresh）。
 
+> 后续修订（接入 fast refresh）：手动 accept（无论局部还是全局重建）体验均不佳，
+> 且没有插件时 Vite 对 .tsx 变更默认整页 reload。demo 最终接入与 vite5/React19 兼容的
+> `@vitejs/plugin-react@^4.7.0`：自动 JSX + fast refresh，任意组件变更按组件热更并保留
+> 状态，无整页刷新；main/PageView 保持纯净渲染，不注册任何手动 accept。
+
 ## 步骤 6 · 继续完成的规划项（服务端能力）
 
 - [x] **撤销 / 重做**：`src/editor/history.ts` 内存 ring（每页各自 past/future，上限 50）；
