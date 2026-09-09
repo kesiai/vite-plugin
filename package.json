@@ -1,6 +1,6 @@
 {
   "name": "@kesi/vite-plugin",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A Vite plugin for KESI development - adds data-code attributes and provides component inspection APIs",
   "type": "module",
   "private": false,
