@@ -42,7 +42,7 @@ export function kesiPlugin(options: PluginOptions = {}): Plugin {
   };
 
   return {
-    name: '@kesi/vite-plugin',
+    name: 'kesi-vite-plugin',
     enforce: 'pre', // 先于 React 等插件执行
 
     config(_config, { command }) {
@@ -65,7 +65,7 @@ export function kesiPlugin(options: PluginOptions = {}): Plugin {
       scanner = new ComponentScanner(resolvedRootDir, pagesDir, componentsDir);
       const scanResult = scanner.scanAll();
       console.log(
-        `[@kesi/vite-plugin] Scanned ${scanResult.components.length} components (${scanResult.pageComponents.length} in ${pagesDir}/), root: ${resolvedRootDir}`
+        `[kesi-vite-plugin] Scanned ${scanResult.components.length} components (${scanResult.pageComponents.length} in ${pagesDir}/), root: ${resolvedRootDir}`
       );
 
       // HTTP API 中间件（/__editor/*，含页面编辑接口）
@@ -122,7 +122,7 @@ function addNodeAttributes(code: string, relativePath: string): { code: string }
   try {
     return transformJSXWithAttributes(code, relativePath);
   } catch (error) {
-    console.error('[@kesi/vite-plugin] Error adding node attributes:', error);
+    console.error('[kesi-vite-plugin] Error adding node attributes:', error);
     return { code };
   }
 }

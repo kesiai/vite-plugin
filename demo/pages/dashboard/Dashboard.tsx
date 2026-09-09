@@ -102,7 +102,7 @@ export default function Dashboard() {
           <Card>
             <CardHeader>
               <CardTitle>近 7 日运行趋势 {useTag({ tableId: 'tt1', dataId: 'YL001', tagId: 'pressure', field: 'value' })}</CardTitle>
-              <CardDescription>折线数据来自页面静态示例，仅用于演示{useTag({ tableId: 'tt1', dataId: 'YL001', tagId: 'temperature', field: 'value' })}</CardDescription>
+              <CardDescription>折线数据来自页面静态示例，仅用于演示{useTag({ tableId: 'tt1', dataId: 'YL001', tagId: 'temperature', field: 'value' })}<Input placeholder={"测试数据" + useTag({ tableId: 'bp_ev58f855a8_meter', dataId: 'EF855A8-F2-EM-02', tagId: 'ep', field: 'value' })} className="w-1/4 m-1" /></CardDescription>
             </CardHeader>
             <CardContent>
               <div className="flex h-40 items-end gap-3">

@@ -20,6 +20,7 @@ import { componentSchema } from './editor/schema';
 import { decodeNodeId } from './nodeId';
 import { PageHistory } from './editor/history';
 import { copyNodeSubtree, pasteNodeSubtree, applyHistory } from './editor/page';
+import { readAppRouteMap } from './editor/appRoutes';
 
 type NextFunction = () => void;
 
@@ -423,8 +424,10 @@ export function createApiHandler(
 
       // ==================== Routers API ====================
 
+      // GET /__editor/routers —— 应用「文件 → 路由」映射（服务端读 router 文件解析，
+      // 替代编辑器客户端的 appRoutes 正则解析；键 = 归一化页面路径 'pages/x'，值 = 路由 path）
       if (pathname === '/__editor/routers' && req.method === 'GET') {
-        const routes = extractRoutes(viteServer.config.root);
+        const routes = readAppRouteMap(viteServer.config.root);
 
         sendJson(res, {
           success: true,
@@ -554,7 +557,7 @@ export function createApiHandler(
           success: true,
           data: {
             hasPlugin: true,
-            pluginName: '@kesi/vite-plugin',
+            pluginName: 'kesi-vite-plugin',
             version: '1.0.0',
             message: 'Plugin is installed and active',
           },
