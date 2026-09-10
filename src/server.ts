@@ -90,11 +90,20 @@ export function createApiHandler(
     }
   };
 
+  // Vite base：经托管服务/反向代理访问时形如 /rest/apps/dev/mo/，
+  // 此时请求 url 带 base 前缀，需先剥离再匹配 /__editor
+  const base = viteServer.config.base;
+
   return async (req: any, res: any, next: NextFunction) => {
+    // 剥离 base 后判断；仅在命中编辑器路由时改写 req.url，
+    // 避免影响 Vite 其余中间件（它们自己会处理 base）
+    const editorUrl = stripBase(req.url ?? '', base);
+
     // 只处理 /__editor 开头的请求
-    if (!req.url?.startsWith('/__editor')) {
+    if (!editorUrl.startsWith('/__editor')) {
       return next();
     }
+    req.url = editorUrl;
 
     // 解析 JSON body（GET 请求无 body）
     if (['POST', 'DELETE'].includes(req.method) && !req.body) {
@@ -672,6 +681,25 @@ export default defineConfig({
 }
 
 // ==================== Helper Functions ====================
+
+/**
+ * 剥离 Vite base 前缀，保留前导 '/'。
+ *
+ * 无可剥离前缀的情形一律原样返回：
+ * - `'/'`（默认）
+ * - `''` / `'./'` / `'../x'` 等相对 base —— 本身不含路径前缀。
+ *   （注：dev 下 Vite 已把 '' 与 './' 归一化为 '/'，此处仍显式兜底）
+ * - 完整 URL 形式的 base（dev 下 Vite 也已归一化为路径）
+ * url 恰好等于 base 时返回 '/'，未命中 base 时也原样返回。
+ * 例：'/rest/apps/dev/mo/__editor/pages' + '/rest/apps/dev/mo/' -> '/__editor/pages'
+ */
+function stripBase(url: string, base: string): string {
+  if (!base || base === '/' || !base.startsWith('/')) return url;
+  const prefix = base.endsWith('/') ? base.slice(0, -1) : base;
+  if (url === prefix) return '/';
+  // 要求边界为 '/'，避免 '/mo' 误匹配 '/moon/...'
+  return url.startsWith(prefix + '/') ? url.slice(prefix.length) : url;
+}
 
 /**
  * 解析 JSON 请求体
